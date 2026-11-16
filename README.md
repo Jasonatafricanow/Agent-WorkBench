@@ -41,7 +41,7 @@
 - `src/workdesk/profiles.py`：`DelegationProfileAdmin`，owner 专用的策略发布入口，**不经过 Agent 工具门面**。
 - 测试：`tests/test_task_service.py`（真实 SQLite 文件，含双写并发、批量回滚、重启、越权、委托上限、人回复回环）。
 
-尚未实现：版本化迁移与日期粒度（WB-02）、承诺/交付物/工作书签实体、timer worker、Host 派发与 unknown 对账、delivery outbox 发送端、Telegram 入口、只读看板、NAS 部署。
+**2026-11-17 第二步：整套框架已实现**（迁移、承诺/交付物/书签/增量、定时器与周期任务、派发与 unknown 对账、审批、通知、记忆指针、身份与入站、HTTP 接口、只读看板、Pi 工作 bot、部署样例）。逐项状态和已知缺口见 [docs/FRAMEWORK_STATUS.md](docs/FRAMEWORK_STATUS.md)。尚未部署，也未做细致审计。
 
 ## 下一步的真实工程工作
 

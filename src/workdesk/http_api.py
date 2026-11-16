@@ -80,7 +80,7 @@ class WorkbenchApp:
                 triggered_conditions=body.get("triggered_conditions") or []),
             "/v1/insights/stagnation": lambda: stagnation(self.db, actor=self.actor(body), now=now),
             "/v1/insights/schedule_load": lambda: schedule_load(self.db, actor=self.actor(body), now=now),
-            "/v1/wake/claim": lambda: _event_dict(self.dispatcher.claim(ws, lease_seconds=int(body.get("lease_seconds", 600)))),
+            "/v1/wake/claim": lambda: self._claim(ws, int(body.get("lease_seconds", 600))),
             "/v1/wake/settle": lambda: self.dispatcher.settle(ws, body["event_id"], HostOutcome(
                 body["status"], body["run_ref"], body.get("session_ref"), body.get("deferred_ref"))),
             "/v1/approvals/request": lambda: self.approvals.request(
@@ -119,6 +119,17 @@ class WorkbenchApp:
             return routes[path]()
         except KeyError as exc:
             raise InvalidOperation(f"missing field {exc}") from exc
+
+    def _claim(self, ws: str, lease_seconds: int) -> dict | None:
+        event = _event_dict(self.dispatcher.claim(ws, lease_seconds=lease_seconds))
+        if event is not None:  # an approval decision points back at the blocked Host session
+            from .storage import connect
+            from contextlib import closing
+            with closing(connect(self.db)) as conn:
+                row = conn.execute("SELECT deferred_ref FROM wake_events WHERE workspace_id=? AND id=?",
+                                   (ws, event["event_id"])).fetchone()
+            event["deferred_ref"] = row["deferred_ref"] if row else None
+        return event
 
     def check_host(self, header: str | None) -> bool:
         expected = f"Bearer {self.host_token}"

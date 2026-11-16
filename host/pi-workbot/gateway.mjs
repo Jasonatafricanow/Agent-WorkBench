@@ -1,0 +1,242 @@
+// Work bot gateway (Agent Host) — a separate Pi process from the personal companion bot.
+//
+// Loop (Anthropic "always-on" shape): inbound message / timer / approval / external change
+//   -> durable WorkBench event -> short Pi Run with WorkBench tools -> facts written back -> sleep.
+// Host-layer fills for Pi (see docs/HOST_RUN_PROTOCOL.md): a local ledger (event id -> session, outcome),
+// the tool_call approval guard (agent/guard-extension.ts), and reopening the same session after approval.
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { wb } from './workbench-client.mjs';
+import { createWorkbenchTools } from './tools.mjs';
+import { setTurn, clearTurn } from './turn-context.mjs';
+
+for (const file of (process.env.WORKBOT_ENV_FILES || '').split(',').filter(Boolean)) {
+  if (!fs.existsSync(file)) continue;
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const m = line.match(/^([A-Z_][A-Z_0-9]*)=(.*)$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^(['"])(.*)\1$/, '$2');
+  }
+}
+
+const RUNTIME = process.env.PI_RUNTIME || '/opt/xiyue-runtime';
+const require = createRequire(RUNTIME + '/package.json');
+const { createAgentSession, SessionManager, ModelRuntime, DefaultResourceLoader } =
+  await import(RUNTIME + '/node_modules/@earendil-works/pi-coding-agent/dist/index.js');
+const { Bot } = require('grammy');
+
+const env = process.env;
+const BOT_ID = env.WORKBOT_BOT_ID || 'workbot';
+const AGENT_IDENTITY = { provider: 'host', bot_id: BOT_ID, external_user_id: env.WORKBOT_AGENT_EXTERNAL_ID || 'agent' };
+const AGENT_DIR = env.WORKBOT_AGENT_DIR || '/workbot/agent';
+const WORK_DIR = env.WORKBOT_WORK_DIR || '/workbot/workspace';
+const LEDGER = path.join(WORK_DIR, 'ledger.jsonl');
+const RECIPIENT_CHATS = JSON.parse(env.WORKBOT_RECIPIENT_CHATS || '{}'); // principal_id -> telegram chat id
+const OWNER_PRINCIPAL = env.WORKBOT_OWNER_PRINCIPAL || 'owner';
+const POLL_MS = Number(env.WORKBOT_POLL_SECONDS || 20) * 1000;
+const TOOL_NAMES = ['list_tasks', 'get_task', 'change_tasks', 'whats_new', 'work_memory_search', 'work_memory_write',
+  ...Object.keys(JSON.parse(env.WORKBOT_GUARDED_TOOLS || '{}'))];
+if (!env.WORKBOT_TELEGRAM_TOKEN || !env.WORKBENCH_HOST_TOKEN || !env.WORKBENCH_WORKSPACE) {
+  throw Error('WORKBOT_TELEGRAM_TOKEN, WORKBENCH_HOST_TOKEN and WORKBENCH_WORKSPACE are required');
+}
+fs.mkdirSync(WORK_DIR, { recursive: true });
+
+const runtime = await ModelRuntime.create();
+const [provider, modelId] = (env.WORKBOT_MODEL || 'xai/grok-4.7').split('/');
+const model = runtime.getModel(provider, modelId);
+if (!model) throw Error('model not available in runtime: ' + env.WORKBOT_MODEL);
+const bot = new Bot(env.WORKBOT_TELEGRAM_TOKEN, { client: { timeoutSeconds: 90 } });
+
+// ------------------------------------------------------------------ ledger
+const ledger = new Map();
+if (fs.existsSync(LEDGER)) {
+  for (const line of fs.readFileSync(LEDGER, 'utf8').split('\n').filter(Boolean)) {
+    try { const entry = JSON.parse(line); ledger.set(entry.event_id, { ...ledger.get(entry.event_id), ...entry }); } catch {}
+  }
+}
+function record(entry) {
+  ledger.set(entry.event_id, { ...ledger.get(entry.event_id), ...entry });
+  fs.appendFileSync(LEDGER, JSON.stringify({ ...entry, at: new Date().toISOString() }) + '\n');
+}
+
+// ---------------------------------------------------------------- sessions
+const sessions = new Map(); // chatKey -> { session, manager }
+const lanes = new Map();    // chatKey -> promise (one Run at a time per chat)
+
+async function sessionFor(chatKey, sessionFile) {
+  if (!sessionFile && sessions.has(chatKey)) return sessions.get(chatKey);
+  const cwd = path.join(WORK_DIR, 'chats', chatKey);
+  fs.mkdirSync(cwd, { recursive: true });
+  const manager = sessionFile && fs.existsSync(sessionFile) ? SessionManager.open(sessionFile) : SessionManager.continueRecent(cwd);
+  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: AGENT_DIR });
+  await resourceLoader.reload();
+  const { session } = await createAgentSession({ cwd, model, modelRuntime: runtime, sessionManager: manager,
+    resourceLoader, customTools: createWorkbenchTools(manager) });
+  await session.bindExtensions({});
+  session.setActiveToolsByName(TOOL_NAMES.filter(name => session.getAllToolNames?.().includes?.(name) ?? true));
+  const entry = { session, manager };
+  sessions.set(chatKey, entry);
+  return entry;
+}
+
+function inLane(chatKey, job) {
+  const next = (lanes.get(chatKey) || Promise.resolve()).then(job, job);
+  lanes.set(chatKey, next.catch(() => {}));
+  return next;
+}
+
+async function runTurn({ chatKey, identity, wakeEventId, taskId, sourceRef, text, sessionFile }) {
+  const { session, manager } = await sessionFor(chatKey, sessionFile);
+  const sessionId = manager.getSessionId();
+  const file = manager.getSessionFile?.() || sessionFile || '';
+  setTurn(sessionId, { identity, wakeEventId, taskId, sourceRef, sessionFile: file });
+  record({ event_id: wakeEventId, status: 'running', chat_key: chatKey, session_file: file, identity });
+  const start = session.state.messages.length;
+  try {
+    await session.prompt(text);
+  } finally {
+    clearTurn(sessionId);
+  }
+  const reply = session.state.messages.slice(start).filter(m => m.role === 'assistant')
+    .flatMap(m => m.content.filter(part => part.type === 'text').map(part => part.text)).join('\n').trim();
+  const outcome = { status: 'completed', run_ref: `${sessionId}:${wakeEventId}`, session_ref: file };
+  record({ event_id: wakeEventId, ...outcome });
+  await wb('/v1/wake/settle', { event_id: wakeEventId, ...outcome }).catch(() => {});
+  return reply;
+}
+
+async function sendLong(chatId, text) {
+  const ids = [];
+  for (let i = 0; i < text.length; i += 3900) {
+    const message = await bot.api.sendMessage(chatId, text.slice(i, i + 3900));
+    ids.push(message.message_id);
+  }
+  return ids;
+}
+
+// ---------------------------------------------------------------- inbound
+bot.command(['approve', 'deny'], async ctx => {
+  const approvalId = (ctx.match || '').trim();
+  const identity = { provider: 'telegram', bot_id: BOT_ID, external_user_id: String(ctx.from.id) };
+  try {
+    const result = await wb('/v1/approvals/decide', { identity, approval_id: approvalId,
+      approve: ctx.message.text.startsWith('/approve'),
+      source_ref: `tg://${BOT_ID}/${ctx.chat.id}/${ctx.message.message_id}` });
+    await ctx.reply(`审批 ${approvalId}：${result.status}`);
+  } catch (error) {
+    await ctx.reply('审批没有记录：' + (error.code || error.message));
+  }
+});
+
+bot.on('message:text', async ctx => {
+  const sourceRef = `tg://${BOT_ID}/${ctx.chat.id}/${ctx.message.message_id}`;
+  let intake;
+  try {
+    intake = await wb('/v1/intake/inbound', { platform: 'telegram', bot_id: BOT_ID, update_id: String(ctx.update.update_id),
+      chat_id: String(ctx.chat.id), message_id: String(ctx.message.message_id), external_user_id: String(ctx.from.id),
+      raw_source_ref: sourceRef, handled_inline: true });
+  } catch (error) {
+    return ctx.reply('工作台暂时连不上，稍后再试。');
+  }
+  if (intake.duplicate) return;
+  if (!intake.accepted) return ctx.reply('这个账号还没有接入工作台。');
+  const identity = { provider: 'telegram', bot_id: BOT_ID, external_user_id: String(ctx.from.id) };
+  const chatKey = `tg-${ctx.chat.id}`;
+  const header = `[来自 ${intake.actor.principal_id}（${intake.actor.role}）· source_ref ${sourceRef} · ${new Date((ctx.message.date) * 1000).toISOString()}]\n`;
+  await inLane(chatKey, async () => {
+    const typing = setInterval(() => ctx.replyWithChatAction('typing').catch(() => {}), 4500);
+    try {
+      const reply = await runTurn({ chatKey, identity, wakeEventId: intake.wake_event_id, sourceRef,
+        text: header + ctx.message.text });
+      if (reply) await sendLong(ctx.chat.id, reply);
+      await wb('/v1/intake/finish', { inbox_id: intake.inbox_id, ok: true }).catch(() => {});
+    } catch (error) {
+      console.error('turn failed:', String(error?.message || error).slice(0, 200));
+      await ctx.reply('这次没处理完，已经记在工作台，稍后会再看。').catch(() => {});
+      await wb('/v1/intake/finish', { inbox_id: intake.inbox_id, ok: false }).catch(() => {});
+    } finally {
+      clearInterval(typing);
+    }
+  });
+});
+
+// -------------------------------------------------------- wake events loop
+const EVENT_PROMPTS = {
+  timer_fired: '一个提醒或周期任务到点了。先 get_task 看当前状态：条件已不成立就不打扰主人；需要主人知道或行动，就用一两句话说明（会转给主人）。',
+  external_change: '外部状态变了（例如 CI、文件、对方回复）。核对任务，更新进度/依赖；需要主人知道才说。',
+  human_action_completed: '主人回复了一个待办请求。读取任务和回复内容，按回复继续推进。',
+  approval_decided: '审批有结果了。若已批准，用完全相同的参数重新发起刚才被拦下的调用；若被拒绝或过期，告诉对方并停止。',
+  agent_handoff: '另一个 Agent 交接了一项工作。读任务和最新书签，核实后继续。',
+  delegation_review_due: '委托复查到期。按任务记录汇总事实给主人，不要自己改委托。',
+  responsibility_changed: '这项任务的执行人或委托级别变了。读任务，按新的范围继续或停下。',
+  user_message: '有一条稍后处理的消息。',
+};
+
+async function pollWake() {
+  const event = await wb('/v1/wake/claim', { lease_seconds: 900 }).catch(() => null);
+  if (!event) return false;
+  let chatKey = 'ops', identity = AGENT_IDENTITY, sessionFile;
+  if (event.kind === 'approval_decided' && event.deferred_ref) {
+    // Reopen the very session whose tool call was blocked; it keeps the original sender's identity.
+    const blockedSession = event.deferred_ref.split('#')[0];
+    const original = [...ledger.values()].reverse().find(e => e.session_file === blockedSession && e.chat_key);
+    if (original) ({ chat_key: chatKey, identity, session_file: sessionFile } = original);
+  }
+  const text = `[系统事件 ${event.kind} · event ${event.event_id} · task ${event.task_id || '无'} · source_ref ${event.source_ref}]\n`
+    + (EVENT_PROMPTS[event.kind] || '处理这个事件。');
+  await inLane(chatKey, async () => {
+    try {
+      const reply = await runTurn({ chatKey, identity, wakeEventId: event.event_id, taskId: event.task_id,
+        sourceRef: event.source_ref, text, sessionFile });
+      if (reply && chatKey === 'ops') {
+        await wb('/v1/delivery/enqueue', { recipient_id: OWNER_PRINCIPAL, channel: 'telegram', payload: { text: reply },
+          dedupe_key: `wake:${event.event_id}`, task_id: event.task_id }).catch(() => {});
+      } else if (reply && chatKey.startsWith('tg-')) {
+        await sendLong(chatKey.slice(3), reply);
+      }
+    } catch (error) {
+      // Leave the lease to expire: WorkBench marks it unknown and the ledger tells us on restart.
+      console.error('wake run failed:', event.kind, String(error?.message || error).slice(0, 200));
+    }
+  });
+  return true;
+}
+
+async function pumpDeliveries() {
+  const items = await wb('/v1/delivery/claim', { limit: 10 }).catch(() => []);
+  for (const item of items || []) {
+    const chatId = RECIPIENT_CHATS[item.recipient_id];
+    if (!chatId) {
+      await wb('/v1/delivery/settle', { delivery_id: item.delivery_id, status: 'failed' }).catch(() => {});
+      continue;
+    }
+    try {
+      const ids = await sendLong(chatId, String(item.payload?.text || ''));
+      await wb('/v1/delivery/settle', { delivery_id: item.delivery_id, status: 'sent', provider_message_id: ids.join(',') });
+    } catch (error) {
+      const definite = Number(error?.error_code) >= 400 && Number(error?.error_code) < 500;
+      await wb('/v1/delivery/settle', { delivery_id: item.delivery_id, status: definite ? 'failed' : 'unknown' }).catch(() => {});
+    }
+  }
+}
+
+async function reconcileFromLedger() {
+  for (const entry of ledger.values()) {
+    if (entry.status === 'completed' && entry.run_ref) {
+      await wb('/v1/wake/settle', { event_id: entry.event_id, status: 'completed', run_ref: entry.run_ref,
+        session_ref: entry.session_ref }).catch(() => {});
+    }
+  }
+}
+
+await reconcileFromLedger();
+setInterval(async () => {
+  try {
+    while (await pollWake()) { /* drain one lane at a time; WorkBench allows one live Run per workspace */ }
+    await pumpDeliveries();
+  } catch (error) {
+    console.error('loop error:', String(error?.message || error).slice(0, 200));
+  }
+}, POLL_MS);
+bot.catch(error => console.error('telegram error:', String(error?.message || error).slice(0, 200)));
+await bot.start({ onStart: () => console.log('work bot polling') });
