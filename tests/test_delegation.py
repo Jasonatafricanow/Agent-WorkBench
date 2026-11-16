@@ -21,6 +21,7 @@ def envelope(level, *, max_level=AutonomyLevel.AGENT_EXCEPTION_ONLY):
             "read_data", "draft_report", "send_internal_update", "send_external",
         }),
         profile_reversible_actions=frozenset({"read_data", "draft_report"}),
+        profile_review_actions=frozenset(),
         profile_approval_conditions=frozenset({
             "new_recipient", "external_commitment", "financial_action",
         }),
@@ -74,6 +75,7 @@ class DelegationPolicyTests(unittest.TestCase):
             profile_max_level=AutonomyLevel.AGENT_EXCEPTION_ONLY,
             profile_allowed_actions=frozenset({"read_data"}),
             profile_reversible_actions=frozenset({"read_data"}),
+            profile_review_actions=frozenset({"send_external"}),
             profile_approval_conditions=frozenset({"external_commitment"}),
             allowed_actions=frozenset({"read_data", "send_external"}),
             reversible_actions=frozenset({"read_data"}),
@@ -89,6 +91,24 @@ class DelegationPolicyTests(unittest.TestCase):
             route_action(envelope(AutonomyLevel.AGENT_BOUNDED), action="send_internal_update"),
             ActionRoute.AGENT_EXECUTE_WITH_REVIEW,
         )
+
+    def test_task_cannot_remove_profile_required_review_actions(self):
+        args = dict(
+            work_class="routine_reporting",
+            autonomy_level=AutonomyLevel.AGENT_BOUNDED,
+            profile_max_level=AutonomyLevel.AGENT_EXCEPTION_ONLY,
+            profile_allowed_actions=frozenset({"read_data", "send_external"}),
+            profile_reversible_actions=frozenset({"read_data"}),
+            profile_review_actions=frozenset({"send_external"}),
+            profile_approval_conditions=frozenset(),
+            allowed_actions=frozenset({"read_data", "send_external"}),
+            reversible_actions=frozenset({"read_data"}),
+            approval_conditions=frozenset(),
+            review_actions=frozenset(),
+            policy_version=1,
+        )
+        with self.assertRaises(ValueError):
+            DelegationEnvelope(**args)
 
     def test_task_level_cannot_exceed_profile_ceiling(self):
         with self.assertRaises(ValueError):
