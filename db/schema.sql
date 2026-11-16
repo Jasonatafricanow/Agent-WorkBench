@@ -21,6 +21,34 @@ CREATE TABLE IF NOT EXISTS memberships (
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   PRIMARY KEY(workspace_id, principal_id)
 );
+-- User-side host configuration; semantic memory contents are NOT copied here.
+CREATE TABLE IF NOT EXISTS user_profiles (
+  workspace_id TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  locale TEXT NOT NULL DEFAULT 'zh-CN',
+  timezone TEXT,
+  work_preferences_json TEXT NOT NULL DEFAULT '{}',
+  version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(workspace_id,principal_id),
+  FOREIGN KEY(workspace_id,principal_id) REFERENCES memberships(workspace_id,principal_id)
+);
+-- Explicit host ACL for a WorkBench principal to read/write an MR USER scope.
+-- Never derive access from shared agent runtime identity or workspace membership alone.
+CREATE TABLE IF NOT EXISTS memory_context_grants (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  actor_principal_id TEXT NOT NULL REFERENCES principals(id),
+  memory_user_id TEXT NOT NULL,
+  capability TEXT NOT NULL CHECK(capability IN ('memory.read','memory.write')),
+  granted_by_principal_id TEXT NOT NULL REFERENCES principals(id),
+  grant_source_ref TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT,
+  PRIMARY KEY(workspace_id,actor_principal_id,memory_user_id,capability),
+  FOREIGN KEY(workspace_id,actor_principal_id)
+    REFERENCES memberships(workspace_id,principal_id)
+);
+
 CREATE TABLE IF NOT EXISTS external_identities (
   provider TEXT NOT NULL,
   bot_id TEXT NOT NULL,
