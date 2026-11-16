@@ -88,3 +88,13 @@ Deliver a working `ResponsibilityService` and `HumanActionService` on top of
 the new schema, with transactional audit and negative authorization tests.
 Do not start the dashboard or broad automation before these contracts work.
 Do not merge or deploy until P0 acceptance gates pass.
+
+
+## Latest branch verification
+
+WorkBench PR #1 currently has **46 offline tests passing** on the
+progressive-delegation schema/policy commit. The tests validate schema
+constraints and pure policy routing only. They are not evidence that
+ResponsibilityService, HumanActionService, TaskService, Telegram or Host
+dispatch is live. Keep the PR Draft until the real services and P0 end-to-end
+gates are implemented.
