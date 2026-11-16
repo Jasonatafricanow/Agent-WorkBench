@@ -82,10 +82,10 @@ def record_inbound(database: str | Path, *, workspace_id: str, platform: str, bo
         wake_id = f"wake-{uuid.uuid4().hex}"
         conn.execute(
             """INSERT INTO wake_events(id,workspace_id,origin,origin_event_id,kind,source_ref,status,attempts,
-                 lease_until,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                 lease_until,host_run_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (wake_id, workspace_id, f"{platform}:{bot_id}", str(update_id), "user_message", raw_source_ref,
              "leased" if handled_inline else "pending", 1 if handled_inline else 0,
-             _plus(now, lease_seconds) if handled_inline else None, now, now))
+             _plus(now, lease_seconds) if handled_inline else None, "inline" if handled_inline else None, now, now))
         return {"inbox_id": inbox_id, "accepted": True, "wake_event_id": wake_id,
                 "actor": {"workspace_id": workspace_id, "principal_id": sender["principal_id"],
                           "role": sender["role"], "source": platform}}
@@ -133,9 +133,9 @@ def record_edit(database: str | Path, *, workspace_id: str, platform: str, bot_i
         wake_id = f"wake-{uuid.uuid4().hex}"
         conn.execute(
             """INSERT INTO wake_events(id,workspace_id,origin,origin_event_id,kind,source_ref,status,attempts,
-                 lease_until,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                 lease_until,host_run_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (wake_id, workspace_id, f"{platform}:{bot_id}:edit", str(update_id), "user_message", raw_source_ref,
-             "leased", 1, _plus(now, lease_seconds), now, now))
+             "leased", 1, _plus(now, lease_seconds), "inline", now, now))
         return {"accepted": True, "inbox_id": original["id"], "revision": revision, "linked_tasks": tasks,
                 "wake_event_id": wake_id,
                 "actor": {"workspace_id": workspace_id, "principal_id": original["sender_principal_id"],

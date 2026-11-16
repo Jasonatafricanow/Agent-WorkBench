@@ -72,7 +72,8 @@ export function createWorkbenchTools(sessionManager) {
       parameters: Type.Object({ operations: Type.Array(Type.Record(Type.String(), Type.Any()), { minItems: 1, maxItems: 40 }) }),
       execute: async (toolCallId, { operations }) => {
         const current = turn();
-        // Idempotency key = the source event + this tool call, so a retried Run replays instead of duplicating.
+        // Idempotency key = source event + this tool call: a re-sent identical call replays its receipt.
+        // A new Run has new tool call ids, so the model must still read before it writes (versions).
         try {
           const result = await wb('/v1/tools/change_tasks', { identity: current.identity,
             idempotency_key: `${current.wakeEventId || 'adhoc'}:${toolCallId}`, operations });

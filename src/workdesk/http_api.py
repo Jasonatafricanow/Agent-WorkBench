@@ -15,6 +15,7 @@ import base64
 import hmac
 import html
 import json
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -95,7 +96,9 @@ class WorkbenchApp:
                 approver=self.actor(body), approval_id=body["approval_id"], approve=bool(body.get("approve")),
                 source_ref=body.get("source_ref", "")),
             "/v1/approvals/consume": lambda: self.approvals.consume(
-                workspace_id=ws, tool_name=body["tool_name"], tool_input=body.get("tool_input")),
+                workspace_id=ws, tool_name=body["tool_name"], tool_input=body.get("tool_input"),
+                session_ref=body.get("session_ref", ""), task_id=body.get("task_id")),
+            "/v1/wake/unknown": lambda: self.dispatcher.unknown(ws),
             "/v1/delivery/enqueue": lambda: self.delivery.enqueue(
                 workspace_id=ws, recipient_id=body["recipient_id"], channel=body.get("channel", "telegram"),
                 payload=body.get("payload") or {}, dedupe_key=body["dedupe_key"], task_id=body.get("task_id"),
@@ -132,6 +135,10 @@ class WorkbenchApp:
                 row = conn.execute("SELECT deferred_ref FROM wake_events WHERE workspace_id=? AND id=?",
                                    (ws, event["event_id"])).fetchone()
             event["deferred_ref"] = row["deferred_ref"] if row else None
+            with closing(connect(self.db)) as conn:  # who a fired reminder is for
+                rem = conn.execute("SELECT recipient_principal_id FROM reminders WHERE workspace_id=? AND id=?",
+                                   (ws, event["origin_event_id"])).fetchone() if event["origin"] == "workbench.timer" else None
+            event["recipient_id"] = rem["recipient_principal_id"] if rem else None
         return event
 
     def check_host(self, header: str | None) -> bool:
@@ -212,6 +219,10 @@ def make_handler(app: WorkbenchApp):
                 return self._send(status, {"ok": False, "error": exc.to_dict()})
             except (ValueError, TypeError) as exc:
                 return self._send(422, {"ok": False, "error": {"code": "INVALID", "message": str(exc)[:300]}})
+            except sqlite3.OperationalError as exc:
+                return self._send(503, {"ok": False, "error": {"code": "BUSY", "message": str(exc)[:200]}})
+            except sqlite3.Error as exc:
+                return self._send(409, {"ok": False, "error": {"code": "CONSTRAINT", "message": str(exc)[:200]}})
 
     return Handler
 

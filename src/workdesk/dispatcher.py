@@ -34,18 +34,25 @@ class Dispatcher:
             conn.execute("""UPDATE wake_events SET status='unknown', lease_until=NULL, updated_at=?
                             WHERE workspace_id=? AND status='leased' AND lease_until<=?""",
                          (now, workspace_id, now))
-            if conn.execute("SELECT 1 FROM wake_events WHERE workspace_id=? AND status='leased'",
+            # One live background Run per workspace. Chat turns answered inline run in their own
+            # per-chat lane on the Host and do not hold this lane.
+            if conn.execute("""SELECT 1 FROM wake_events WHERE workspace_id=? AND status='leased'
+                               AND COALESCE(host_run_ref,'')!='inline'""",
                             (workspace_id,)).fetchone():
                 return None
-            row = conn.execute(
-                """SELECT workspace_id,id,origin,origin_event_id,kind,source_ref,created_at,task_id
-                   FROM wake_events WHERE workspace_id=? AND status='pending'
-                   ORDER BY created_at,id LIMIT 1""", (workspace_id,)).fetchone()
-            if row is None:
-                return None
-            conn.execute("""UPDATE wake_events SET status='leased', attempts=attempts+1, lease_until=?, updated_at=?
-                            WHERE id=? AND status='pending'""", (_plus(now, lease_seconds), now, row[1]))
-            return WakeEvent(*tuple(row))
+            for row in conn.execute(
+                    """SELECT workspace_id,id,origin,origin_event_id,kind,source_ref,created_at,task_id
+                       FROM wake_events WHERE workspace_id=? AND status='pending'
+                       ORDER BY created_at,id LIMIT 20""", (workspace_id,)).fetchall():
+                try:
+                    event = WakeEvent(*tuple(row))
+                except ValueError:  # a malformed row must not block the whole inbox
+                    conn.execute("UPDATE wake_events SET status='failed', updated_at=? WHERE id=?", (now, row[1]))
+                    continue
+                conn.execute("""UPDATE wake_events SET status='leased', attempts=attempts+1, lease_until=?, updated_at=?
+                                WHERE id=? AND status='pending'""", (_plus(now, lease_seconds), now, row[1]))
+                return event
+            return None
 
     def settle(self, workspace_id: str, event_id: str, outcome: HostOutcome) -> None:
         now = self._clock()
@@ -66,6 +73,13 @@ class Dispatcher:
             return {"dispatched": True, "event_id": event.event_id, "acknowledged": False, "error": str(exc)[:200]}
         self.settle(workspace_id, event.event_id, outcome)
         return {"dispatched": True, "event_id": event.event_id, "acknowledged": True, "status": outcome.status}
+
+    def unknown(self, workspace_id: str) -> list[dict]:
+        """Events whose outcome nobody confirmed; shown to the owner and re-settled from the Host ledger."""
+        with write_transaction(self._db) as conn:
+            return [dict(r) for r in conn.execute(
+                """SELECT id,kind,task_id,origin,source_ref,attempts,updated_at FROM wake_events
+                   WHERE workspace_id=? AND status='unknown' ORDER BY updated_at""", (workspace_id,))]
 
     def reconcile_unknown(self, workspace_id: str) -> dict:
         """Ask the Host what happened to each unknown event; unresolved ones stay unknown for a human."""

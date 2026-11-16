@@ -32,7 +32,8 @@ class Fixture(unittest.TestCase):
             c.executemany("INSERT INTO memberships(workspace_id,principal_id,role) VALUES('ws',?,?)", [
                 ("owner", "owner"), ("gao", "requester"), ("agent", "editor"), ("agent2", "editor")])
         self.svc = SqliteTaskService(self.db, clock=lambda: NOW)
-        self.owner = ActorContext("ws", "owner", "owner", "telegram")
+        # Trusted CLI source: owner-only ops then need no inbox message (see OwnerSourceTests).
+        self.owner = ActorContext("ws", "owner", "owner", "cli")
         self.agent = ActorContext("ws", "agent", "editor", "host")
         self.agent2 = ActorContext("ws", "agent2", "editor", "host")
         self.gao = ActorContext("ws", "gao", "requester", "telegram")
@@ -292,6 +293,44 @@ class DelegationTests(Fixture):
                              (out["wake_event_id"],)).fetchone()
         self.assertEqual(wake, ("human_action_completed", "pending", self.task))
         self.assertEqual(self.svc.overview(actor=self.owner, limit=10)["my_human_actions"], [])
+
+
+
+class OwnerSourceTests(Fixture):
+    def test_owner_only_change_via_telegram_must_cite_a_real_owner_message(self):
+        owner_tg = ActorContext("ws", "owner", "owner", "telegram")
+        task = self.create(state="DOING")["task_id"]
+        focus = {"op": "set_focus", "slot": "NOW", "task_id": task, "evidence_type": "explicit_user",
+                 "source_ref": "tg://made-up"}
+        with self.assertRaises(EvidenceRequired):
+            self.apply(owner_tg, "f-fake", focus)
+        with closing(sqlite3.connect(self.db)) as c, c:
+            c.execute("""INSERT INTO inbox_messages(id,workspace_id,platform,bot_id,update_id,chat_id,message_id,
+                           sender_principal_id,raw_source_ref,received_at,updated_at)
+                         VALUES('in1','ws','telegram','bot','u1','c','m1','owner','tg://bot/c/m1',?,?)""", (NOW, NOW))
+        self.apply(owner_tg, "f-real", dict(focus, source_ref="tg://bot/c/m1"))
+
+    def test_only_the_executor_gets_a_delegated_route(self):
+        DelegationProfileAdmin(self.db, clock=lambda: NOW).publish(
+            owner=self.owner, work_class="w", max_autonomy_level="agent_bounded", allowed_actions=["act"])
+        task = self.create(state="READY")["task_id"]
+        self.apply(self.owner, "d", {"op": "assign_responsibility", "task_id": task, "expected_version": 1,
+                                     "executor_id": "agent", "work_class": "w", "autonomy_level": "agent_bounded",
+                                     "evidence_type": "explicit_user", "source_ref": SRC, "reason": "go"})
+        route = lambda actor: self.svc.evaluate_action(actor=actor, task_id=task, action="act")["route"]
+        self.assertEqual(route(self.agent), "agent_execute")
+        self.assertEqual(route(self.agent2), "out_of_scope")
+
+    def test_requester_whats_new_hides_internal_work(self):
+        mine = self.create(actor=self.gao, key="g")["task_id"]
+        self.svc.changes_since(actor=self.gao, view="tg", mark_seen=True)
+        self.apply(self.owner, "p", {"op": "patch_task", "task_id": mine, "expected_version": 1,
+                                     "fields": {"priority": 0}, "evidence_type": "explicit_user"})
+        self.apply(self.owner, "s", {"op": "transition", "task_id": mine, "expected_version": 2, "to": "READY",
+                                     "evidence_type": "explicit_user", "reason": "accepted"})
+        events = self.svc.changes_since(actor=self.gao, view="tg")["events"]
+        self.assertEqual([e["kind"] for e in events], ["state_changed"])
+        self.assertIsNone(events[0]["actor_id"])
 
 
 if __name__ == "__main__":

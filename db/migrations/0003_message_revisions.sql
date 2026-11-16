@@ -9,3 +9,6 @@ CREATE TABLE IF NOT EXISTS inbox_revisions (
   recorded_at TEXT NOT NULL,
   PRIMARY KEY(inbox_id, revision)
 );
+
+-- Monthly schedules remember the intended day so 31 -> 28 -> 31 instead of drifting to 28.
+ALTER TABLE schedule_rules ADD COLUMN anchor_day INTEGER;

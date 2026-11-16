@@ -85,7 +85,7 @@ function inLane(chatKey, job) {
   return next;
 }
 
-async function runTurn({ chatKey, identity, wakeEventId, taskId, sourceRef, text, sessionFile,
+async function runTurn({ chatKey, chatId, identity, wakeEventId, taskId, sourceRef, text, sessionFile,
                          extraWakeIds = [], inboxIds = [], role }) {
   const { session, manager } = await sessionFor(chatKey, sessionFile);
   const sessionId = manager.getSessionId();
@@ -93,11 +93,19 @@ async function runTurn({ chatKey, identity, wakeEventId, taskId, sourceRef, text
   const turn = { identity, wakeEventId, taskId, sourceRef, sessionFile: file };
   setTurn(sessionId, turn);
   for (const id of [wakeEventId, ...extraWakeIds]) {
-    record({ event_id: id, status: 'running', chat_key: chatKey, session_file: file, identity });
+    record({ event_id: id, status: 'running', chat_key: chatKey, chat_id: chatId, session_file: file, identity });
   }
   const start = session.state.messages.length;
   try {
     await session.prompt(text);
+  } catch (error) {
+    // A failed Run is settled as failed, never left leased to turn into "unknown".
+    for (const id of [wakeEventId, ...extraWakeIds]) {
+      const failed = { status: 'failed', run_ref: `${sessionId}:${wakeEventId}:failed` };
+      record({ event_id: id, ...failed });
+      await wb('/v1/wake/settle', { event_id: id, ...failed }).catch(() => {});
+    }
+    throw error;
   } finally {
     clearTurn(sessionId);
   }
@@ -147,7 +155,7 @@ const MERGE_MS = Number(env.WORKBOT_MERGE_MS || 2500);
 const pending = new Map(); // chatKey -> { ctx, items: [{intake, text, sourceRef}], timer }
 
 function queueForRun(chatKey, ctx, item) {
-  const key = `${chatKey}:${ctx.from.id}`; // never merge messages from different people (group chats)
+  const key = chatKey; // chatKey includes the sender: people in a group never share a session or a merge
   const slot = pending.get(key) || { ctx, items: [], timer: null };
   slot.items.push(item);
   slot.ctx = ctx;
@@ -164,7 +172,7 @@ async function flush(chatKey, { ctx, items }) {
     const typing = setInterval(() => ctx.replyWithChatAction('typing').catch(() => {}), 4500);
     const ok = await (async () => {
       try {
-        const reply = await runTurn({ chatKey, identity, wakeEventId: first.intake.wake_event_id, sourceRef: first.sourceRef,
+        const reply = await runTurn({ chatKey, chatId: ctx.chat.id, identity, wakeEventId: first.intake.wake_event_id, sourceRef: first.sourceRef,
           text, extraWakeIds: items.slice(1).map(i => i.intake.wake_event_id),
           inboxIds: items.map(i => i.intake.inbox_id), role: first.intake.actor.role });
         if (reply) await sendLong(ctx.chat.id, reply);
@@ -194,7 +202,7 @@ bot.on('message:text', async ctx => {
   }
   if (intake.duplicate) return;
   if (!intake.accepted) return ctx.reply('这个账号还没有接入工作台。');
-  queueForRun(`tg-${ctx.chat.id}`, ctx, { intake, sourceRef, label: '消息', text: ctx.message.text });
+  queueForRun(`tg-${ctx.chat.id}-${ctx.from.id}`, ctx, { intake, sourceRef, label: '消息', text: ctx.message.text });
 });
 
 bot.on('edited_message:text', async ctx => {
@@ -205,7 +213,7 @@ bot.on('edited_message:text', async ctx => {
     raw_source_ref: sourceRef }).catch(() => null);
   if (!intake?.accepted || intake.duplicate) return;
   const note = intake.linked_tasks?.length ? `（这条消息关联任务：${intake.linked_tasks.join(', ')}，请核对是否需要更正）` : '';
-  queueForRun(`tg-${ctx.chat.id}`, ctx, { intake, sourceRef, label: '编辑了之前的消息' + note, text: message.text });
+  queueForRun(`tg-${ctx.chat.id}-${ctx.from.id}`, ctx, { intake, sourceRef, label: '编辑了之前的消息' + note, text: message.text });
 });
 
 // -------------------------------------------------------- wake events loop
@@ -223,24 +231,25 @@ const EVENT_PROMPTS = {
 async function pollWake() {
   const event = await wb('/v1/wake/claim', { lease_seconds: 900 }).catch(() => null);
   if (!event) return false;
-  let chatKey = 'ops', identity = AGENT_IDENTITY, sessionFile;
+  let chatKey = 'ops', identity = AGENT_IDENTITY, sessionFile, chatId = null;
   if (event.kind === 'approval_decided' && event.deferred_ref) {
     // Reopen the very session whose tool call was blocked; it keeps the original sender's identity.
     const blockedSession = event.deferred_ref.split('#')[0];
     const original = [...ledger.values()].reverse().find(e => e.session_file === blockedSession && e.chat_key);
-    if (original) ({ chat_key: chatKey, identity, session_file: sessionFile } = original);
+    if (original) ({ chat_key: chatKey, identity, session_file: sessionFile, chat_id: chatId } = original);
   }
   const text = `[系统事件 ${event.kind} · event ${event.event_id} · task ${event.task_id || '无'} · source_ref ${event.source_ref}]\n`
     + (EVENT_PROMPTS[event.kind] || '处理这个事件。');
   await inLane(chatKey, async () => {
     try {
-      const reply = await runTurn({ chatKey, identity, wakeEventId: event.event_id, taskId: event.task_id,
+      const reply = await runTurn({ chatKey, chatId, identity, wakeEventId: event.event_id, taskId: event.task_id,
         sourceRef: event.source_ref, text, sessionFile });
       if (reply && chatKey === 'ops') {
-        await wb('/v1/delivery/enqueue', { recipient_id: OWNER_PRINCIPAL, channel: 'telegram', payload: { text: reply },
-          dedupe_key: `wake:${event.event_id}`, task_id: event.task_id }).catch(() => {});
-      } else if (reply && chatKey.startsWith('tg-')) {
-        await sendLong(chatKey.slice(3), reply);
+        // A fired reminder goes to its own recipient; other background results go to the owner.
+        await wb('/v1/delivery/enqueue', { recipient_id: event.recipient_id || OWNER_PRINCIPAL, channel: 'telegram',
+          payload: { text: reply }, dedupe_key: `wake:${event.event_id}`, task_id: event.task_id }).catch(() => {});
+      } else if (reply && chatId) {
+        await sendLong(chatId, reply);
       }
     } catch (error) {
       // Leave the lease to expire: WorkBench marks it unknown and the ledger tells us on restart.
@@ -269,10 +278,16 @@ async function pumpDeliveries() {
 }
 
 async function reconcileFromLedger() {
+  // The ledger is the Host's record per event: completed runs are re-settled; a run still "running"
+  // when this process died ended without a result and is settled as failed.
   for (const entry of ledger.values()) {
     if (entry.status === 'completed' && entry.run_ref) {
       await wb('/v1/wake/settle', { event_id: entry.event_id, status: 'completed', run_ref: entry.run_ref,
         session_ref: entry.session_ref }).catch(() => {});
+    } else if (entry.status === 'running') {
+      const failed = { status: 'failed', run_ref: `${entry.event_id}:host-restarted` };
+      record({ event_id: entry.event_id, ...failed });
+      await wb('/v1/wake/settle', { event_id: entry.event_id, ...failed }).catch(() => {});
     }
   }
 }

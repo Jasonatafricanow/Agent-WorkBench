@@ -47,7 +47,23 @@ class ApprovalService:
                 (approval_id, host_actor.workspace_id, wake_event_id, task_id, host_actor.principal_id,
                  approver_id or ws["owner_id"], summary, host_deferred_ref, now, tool_name,
                  fingerprint(tool_name, tool_input), expires_at))
+            # The approver learns about it in the same transaction, whoever triggered the call.
+            conn.execute(
+                """INSERT INTO delivery_outbox(id,workspace_id,task_id,recipient_principal_id,channel,payload_json,
+                     dedupe_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (f"dlv-out-{uuid.uuid4().hex}", host_actor.workspace_id, task_id, approver_id or ws["owner_id"],
+                 "telegram", json.dumps({"text": f"待审批 {approval_id}：{summary}\n"
+                                                 f"回复 /approve {approval_id} 或 /deny {approval_id}",
+                                         "approval_id": approval_id}, ensure_ascii=False),
+                 f"approval:{approval_id}", now, now))
             return {"approval_id": approval_id, "approver_id": approver_id or ws["owner_id"]}
+
+    def pending(self, *, workspace_id: str, approver_id: str) -> list[dict]:
+        with write_transaction(self._db) as conn:
+            return [dict(r) for r in conn.execute(
+                """SELECT id,task_id,tool_name,request_summary,created_at,expires_at FROM approval_requests
+                   WHERE workspace_id=? AND approver_id=? AND status='pending' ORDER BY created_at""",
+                (workspace_id, approver_id))]
 
     def decide(self, *, approver: ActorContext, approval_id: str, approve: bool, source_ref: str) -> dict:
         now = self._clock()
@@ -78,16 +94,21 @@ class ApprovalService:
                  "approval_decided", source_ref, None, row["host_deferred_ref"], now, now))
             return {"approval_id": approval_id, "status": status, "wake_event_id": wake_id}
 
-    def consume(self, *, workspace_id: str, tool_name: str, tool_input: Any) -> dict | None:
-        """Host hook: let exactly one matching, unexpired approved call through."""
+    def consume(self, *, workspace_id: str, tool_name: str, tool_input: Any, session_ref: str,
+                task_id: str | None = None) -> dict | None:
+        """Host hook: let exactly one matching, unexpired approved call through, and only in the
+        session (and for the task) that asked for it."""
         now = self._clock()
         fp = fingerprint(tool_name, tool_input)
+        if not session_ref:
+            return None
         with write_transaction(self._db) as conn:
             row = conn.execute(
                 """SELECT id FROM approval_requests WHERE workspace_id=? AND status='approved'
                    AND consumed_at IS NULL AND tool_name=? AND action_fingerprint=?
+                   AND substr(host_deferred_ref,1,length(?)+1)=?||'#' AND task_id IS ?
                    AND (expires_at IS NULL OR expires_at>?) ORDER BY decided_at LIMIT 1""",
-                (workspace_id, tool_name, fp, now)).fetchone()
+                (workspace_id, tool_name, fp, session_ref, session_ref, task_id, now)).fetchone()
             if row is None:
                 return None
             conn.execute("UPDATE approval_requests SET consumed_at=? WHERE id=?", (now, row["id"]))

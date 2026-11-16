@@ -269,6 +269,15 @@ class SqliteTaskService:
                     """SELECT id,task_id,title,status,revision,submitted_at FROM deliverables
                        WHERE workspace_id=? AND status NOT IN ('ACCEPTED') ORDER BY updated_at DESC LIMIT ?""",
                     (ws, limit))],
+                "my_approvals": [dict(r) for r in conn.execute(
+                    """SELECT id,task_id,tool_name,request_summary,created_at,expires_at FROM approval_requests
+                       WHERE workspace_id=? AND approver_id=? AND status='pending' ORDER BY created_at LIMIT ?""",
+                    (ws, actor.principal_id, limit))],
+                "unknown_outcomes": [dict(r) for r in conn.execute(
+                    """SELECT id,kind,task_id,updated_at FROM wake_events WHERE workspace_id=? AND status='unknown'
+                       ORDER BY updated_at LIMIT ?""", (ws, limit))] + [dict(r) for r in conn.execute(
+                    """SELECT id,'delivery' AS kind,task_id,updated_at FROM delivery_outbox WHERE workspace_id=?
+                       AND status='unknown' ORDER BY updated_at LIMIT ?""", (ws, limit))],
                 "my_human_actions": [dict(r) for r in conn.execute(
                     """SELECT * FROM human_action_requests WHERE workspace_id=? AND assignee_principal_id=?
                        AND status IN ('pending','in_progress') ORDER BY
@@ -289,7 +298,9 @@ class SqliteTaskService:
                 "SELECT last_seen_seq FROM view_watermarks WHERE workspace_id=? AND principal_id=? AND view=?",
                 (ws, actor.principal_id, view)).fetchone()
             since = mark["last_seen_seq"] if mark else 0
-            scope, args = ("", ()) if role in READ_ALL_ROLES else ("AND t.requester_id=?", (actor.principal_id,))
+            scope, args = ("", ()) if role in READ_ALL_ROLES else (
+                "AND t.requester_id=? AND (e.actor_id=? OR e.kind IN ('created','state_changed','official_due_set'))",
+                (actor.principal_id, actor.principal_id))
             rows = conn.execute(
                 f"""SELECT e.rowid AS seq, e.task_id, t.title, e.kind, e.actor_id, e.reason, e.after_json,
                           e.evidence_type, e.occurred_at
@@ -300,8 +311,9 @@ class SqliteTaskService:
             if role == "requester":
                 for event in events:
                     event.pop("after_json")
+                    event.pop("evidence_type")
                     if event["actor_id"] != actor.principal_id:
-                        event["reason"] = ""
+                        event["reason"], event["actor_id"] = "", None
             last = events[-1]["seq"] if events else since
             if mark_seen and last > since:
                 conn.execute(
@@ -329,6 +341,8 @@ class SqliteTaskService:
                 return {"route": "out_of_scope", "reason": "no active delegation for this task"}
             if resp["status"] == "paused":
                 return {"route": "human_execution_required", "reason": "delegation paused by owner"}
+            if resp["current_executor_id"] != actor.principal_id:
+                return {"route": "out_of_scope", "reason": "caller is not the current executor of this task"}
             profile = self._profile(conn, actor.workspace_id, resp["profile_id"]) if resp["profile_id"] else None
             envelope = self._envelope(resp, profile)
             route = route_action(envelope, action=action, triggered_conditions=triggered_conditions)
@@ -472,9 +486,25 @@ class _Batch:
         if evidence not in STRONG_EVIDENCE or not op.get("source_ref") or not _text(op.get("reason"), "reason"):
             raise EvidenceRequired(f"{what} needs explicit_user/verified_tool evidence, source_ref and reason")
 
-    def owner_only(self, what: str) -> None:
+    def owner_only(self, what: str, op: dict | None = None) -> None:
         if self.role != "owner":
             raise Forbidden(f"only the workspace owner may {what}")
+        if op is not None and self.actor.source != "cli":
+            ref = op.get("source_ref")
+            found = ref and self.c.execute(
+                """SELECT 1 FROM inbox_messages i WHERE i.workspace_id=? AND i.sender_principal_id=?
+                   AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r
+                        WHERE r.inbox_id=i.id AND r.raw_source_ref=?))""",
+                (self.ws, self.actor.principal_id, ref, ref)).fetchone()
+            if not found:
+                raise EvidenceRequired(f"{what} must cite a message the owner actually sent (source_ref)")
+
+    def project(self, project_id: Any) -> str | None:
+        if project_id is None:
+            return None
+        if not self.c.execute("SELECT 1 FROM projects WHERE workspace_id=? AND id=?", (self.ws, project_id)).fetchone():
+            raise InvalidOperation("project_id is not a project of this workspace", field="project_id")
+        return project_id
 
     def member(self, principal_id: Any, field: str) -> str:
         row = self.c.execute(
@@ -527,7 +557,7 @@ class _Batch:
             "official_due_at": _opt_utc(op.get("official_due_at"), "official_due_at"),
             "soft_due_at": _opt_utc(op.get("soft_due_at"), "soft_due_at"),
             "planned_start_at": _opt_utc(op.get("planned_start_at"), "planned_start_at"),
-            "project_id": op.get("project_id"), "requester_id": requester, "assignee_id": assignee,
+            "project_id": self.project(op.get("project_id")), "requester_id": requester, "assignee_id": assignee,
         }
         cols = ", ".join(values)
         self.c.execute(
@@ -555,7 +585,7 @@ class _Batch:
             elif key == "assignee_id":
                 value = self.member(value, "assignee_id")
             elif key == "project_id":
-                value = value or None
+                value = self.project(value or None)
             else:
                 value = _text(value, key, required=(key == "title"))
             if value != task[key]:
@@ -761,10 +791,11 @@ class _Batch:
         self.c.execute(
             """INSERT INTO schedule_rules(id,workspace_id,title,template_json,timezone,frequency,interval_n,
                  local_time,next_fire_local,next_fire_at,max_occurrences,until_at,created_by_principal_id,
-                 created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 created_at,updated_at,anchor_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (schedule_id, self.ws, _text(op.get("title"), "title", required=True), _dumps(template), tz_name,
              op["frequency"], interval_n, op["local_time"], local, at, max_occ, until_at,
-             self.actor.principal_id, self.now, self.now))
+             self.actor.principal_id, self.now, self.now,
+             int(op.get("anchor_day") or local[8:10]) if op["frequency"] == "monthly" else None))
         self.bind(op, schedule_id)
         return {"schedule_id": schedule_id, "next_fire_local": local, "next_fire_at": at}
 
@@ -851,7 +882,7 @@ class _Batch:
             before={k: task[k] for k in after}, after={"progress": text, **after})}
 
     def op_set_focus(self, op: dict, evidence: str) -> dict:
-        self.owner_only("set NOW/NEXT focus")
+        self.owner_only("set NOW/NEXT focus", op)
         slot = op.get("slot")
         if slot not in ("NOW", "NEXT1", "NEXT2"):
             raise InvalidOperation("slot must be NOW, NEXT1 or NEXT2", field="slot")
@@ -1052,7 +1083,7 @@ class _Batch:
 
     # --------------------------------------------------------- responsibility
     def op_assign_responsibility(self, op: dict, evidence: str) -> dict:
-        self.owner_only("change responsibility or autonomy")
+        self.owner_only("change responsibility or autonomy", op)
         self.strong(op, evidence, "changing responsibility or autonomy")
         task = self.task(op)
         level = op.get("autonomy_level")
@@ -1115,7 +1146,7 @@ class _Batch:
                     "profile_version": row["profile_version"], "responsibility_event": event_type})}
 
     def op_set_responsibility_status(self, op: dict, evidence: str) -> dict:
-        self.owner_only("pause, revoke or resume delegation")
+        self.owner_only("pause, revoke or resume delegation", op)
         self.strong(op, evidence, "pausing, revoking or resuming delegation")
         task = self.task(op)
         status = op.get("status")

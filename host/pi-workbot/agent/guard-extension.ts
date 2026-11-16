@@ -13,6 +13,9 @@ import { wb } from '../workbench-client.mjs';
 const GUARDED: Record<string, any> = JSON.parse(process.env.WORKBOT_GUARDED_TOOLS || '{}');
 const PROMPT_FILE = process.env.WORKBOT_PROMPT_FILE || new URL('./WORKBOT.md', import.meta.url).pathname;
 const APPROVAL_HOURS = Number(process.env.WORKBOT_APPROVAL_HOURS || 24);
+// Delegation is evaluated for the Agent that executes, not for the person who is chatting.
+const AGENT_IDENTITY = { provider: 'host', bot_id: process.env.WORKBOT_BOT_ID || 'workbot',
+  external_user_id: process.env.WORKBOT_AGENT_EXTERNAL_ID || 'agent' };
 
 export default function (pi: any) {
   pi.on('before_agent_start', async (event: any) => {
@@ -28,10 +31,13 @@ export default function (pi: any) {
     const turn = (globalThis as any).__workbotTurns?.get(sessionId);
     if (!turn?.identity) return { block: true, reason: 'No verified identity for this run; guarded tool refused.', terminate: true };
     const conditions = rule.conditions_from && event.input?.[rule.conditions_from] ? [rule.conditions_from] : [];
+    // The guarded call must name the task it serves (rule.task_from, default "task_id"); the task that
+    // happened to wake this Run does not authorise unrelated calls.
+    const taskId = event.input?.[rule.task_from || 'task_id'] || null;
     let route = 'human_approval_required';
-    if (turn.taskId) {
+    if (taskId) {
       try {
-        route = (await wb('/v1/evaluate_action', { identity: turn.identity, task_id: turn.taskId,
+        route = (await wb('/v1/evaluate_action', { identity: AGENT_IDENTITY, task_id: taskId,
           action: rule.action, triggered_conditions: conditions })).route;
       } catch { route = 'human_approval_required'; }
     }
@@ -39,15 +45,17 @@ export default function (pi: any) {
     if (route !== 'human_approval_required') {
       return { block: true, reason: `Not delegated (${route}). Prepare it for the owner instead of executing.` };
     }
-    const consumed = await wb('/v1/approvals/consume', { tool_name: event.toolName, tool_input: event.input }).catch(() => null);
+    const sessionRef = turn.sessionFile || sessionId;
+    const consumed = await wb('/v1/approvals/consume', { tool_name: event.toolName, tool_input: event.input,
+      session_ref: sessionRef, task_id: taskId }).catch(() => null);
     if (consumed) return undefined;
     const expires = new Date(Date.now() + APPROVAL_HOURS * 3600e3).toISOString().replace(/\.\d+Z$/, 'Z');
     try {
       const request = await wb('/v1/approvals/request', {
-        identity: turn.identity, wake_event_id: turn.wakeEventId, task_id: turn.taskId || null,
+        identity: turn.identity, wake_event_id: turn.wakeEventId, task_id: taskId,
         tool_name: event.toolName, tool_input: event.input,
         summary: `${rule.action}: ${JSON.stringify(event.input).slice(0, 300)}`,
-        host_deferred_ref: `${turn.sessionFile || sessionId}#${event.toolCallId}`, expires_at: expires,
+        host_deferred_ref: `${sessionRef}#${event.toolCallId}`, expires_at: expires,
       });
       turn.pendingApproval = request.approval_id;
       return { block: true, terminate: true,

@@ -49,7 +49,7 @@ class Base(unittest.TestCase):
                           [("owner", "owner"), ("gao", "requester"), ("agent", "editor")])
         self.clock = Clock()
         self.svc = SqliteTaskService(self.db, clock=self.clock)
-        self.owner = ActorContext("ws", "owner", "owner", "telegram")
+        self.owner = ActorContext("ws", "owner", "owner", "cli")
         self.agent = ActorContext("ws", "agent", "editor", "host")
 
     def apply(self, actor, key, *ops):
@@ -216,15 +216,19 @@ class DispatchApprovalOutboxTests(Base):
         svc = ApprovalService(self.db, clock=self.clock)
         call = {"to": "gao", "text": "final plan attached"}
         req = svc.request(host_actor=self.agent, wake_event_id="wk", tool_name="send_message", tool_input=call,
-                          summary="send final plan to Gao", host_deferred_ref="session-1:call-3",
+                          summary="send final plan to Gao", host_deferred_ref="session-1#call-3",
                           expires_at="2026-11-18T00:00:00Z")
-        self.assertIsNone(svc.consume(workspace_id="ws", tool_name="send_message", tool_input=call))
+        use = lambda inp, session="session-1": svc.consume(workspace_id="ws", tool_name="send_message",
+                                                          tool_input=inp, session_ref=session)
+        self.assertIsNone(use(call))
+        self.assertEqual(self.q("SELECT recipient_principal_id FROM delivery_outbox WHERE dedupe_key=?",
+                                f"approval:{req['approval_id']}"), [("owner",)])  # approver is told
         decided = svc.decide(approver=self.owner, approval_id=req["approval_id"], approve=True, source_ref=SRC)
         self.assertEqual(decided["status"], "approved")
-        self.assertIsNone(svc.consume(workspace_id="ws", tool_name="send_message",
-                                      tool_input={"to": "someone-else", "text": "final plan attached"}))
-        self.assertIsNotNone(svc.consume(workspace_id="ws", tool_name="send_message", tool_input=call))
-        self.assertIsNone(svc.consume(workspace_id="ws", tool_name="send_message", tool_input=call))
+        self.assertIsNone(use({"to": "someone-else", "text": "final plan attached"}))
+        self.assertIsNone(use(call, session="session-2"))  # another session cannot use it
+        self.assertIsNotNone(use(call))
+        self.assertIsNone(use(call))
 
     def test_delivery_cancels_stale_followups_and_respects_quiet_hours(self):
         t = self.task()
@@ -361,6 +365,56 @@ class GapFillTests(Base):
         page = render_task(self.svc, self.owner, str(self.db), t, NOW)
         self.assertIn("进展", page)
         self.assertIn("outline done", page)
+
+
+
+class AuditRegressionTests(Base):
+    def test_completion_report_is_delivered_but_stale_followup_is_not(self):
+        t = self.task()
+        rem = self.apply(self.owner, "r", {"op": "set_reminder", "task_id": t, "expected_version": 1,
+                                           "local_at": "2026-11-20T10:00", "evidence_type": "explicit_user"})[0]
+        self.apply(self.owner, "d", {"op": "transition", "task_id": t, "expected_version": 2, "to": "DONE",
+                                     "evidence_type": "explicit_user", "source_ref": SRC, "reason": "done"})
+        out = DeliveryOutbox(self.db, clock=self.clock)
+        report = out.enqueue(workspace_id="ws", recipient_id="owner", channel="telegram",
+                             payload={"text": "X is done"}, dedupe_key="k-report", task_id=t)
+        out.enqueue(workspace_id="ws", recipient_id="owner", channel="telegram", payload={"text": "chase"},
+                    dedupe_key="k-chase", task_id=t, reminder_id=rem["reminder_id"])
+        self.assertEqual([x["delivery_id"] for x in out.claim(workspace_id="ws")], [report["delivery_id"]])
+
+    def test_month_end_schedule_does_not_drift_and_catch_up_is_bounded(self):
+        self.assertEqual(advance("2026-02-28T18:00", "monthly", 1, 31), "2026-03-31T18:00")
+        self.apply(self.owner, "s", {"op": "create_schedule", "title": "Month end", "frequency": "monthly",
+                                     "local_time": "18:00", "start_local_date": "2026-01-31",
+                                     "evidence_type": "explicit_user"})
+        self.clock.now = "2026-11-17T02:00:00Z"  # ten months of missed occurrences
+        out = fire_due(self.db, now=self.clock.now)["schedule_occurrences"]
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["occurrence_local"], "2026-10-31T18:00")
+        self.assertEqual(self.q("SELECT next_fire_local FROM schedule_rules")[0][0], "2026-11-30T18:00")
+
+    def test_bad_wake_row_does_not_block_the_inbox(self):
+        t = self.task()
+        with closing(sqlite3.connect(self.db)) as c, c:
+            c.execute("INSERT INTO wake_events(id,workspace_id,origin,origin_event_id,kind,source_ref,created_at,updated_at)"
+                      " VALUES('bad','ws','x','1','user_message','',?,?)", ("2026-11-17T00:00:00Z", NOW))
+            c.execute("INSERT INTO wake_events(id,workspace_id,task_id,origin,origin_event_id,kind,source_ref,created_at,updated_at)"
+                      " VALUES('good','ws',?,'x','2','timer_fired','s',?,?)", (t, NOW, NOW))
+        with self.assertRaises(InvalidOperation):
+            observe_watch(self.db, workspace_id="ws", watch_id="w", observed_value="v", source_ref="", now=NOW)
+        event = Dispatcher(self.db, FakeHost(), clock=self.clock).claim("ws")
+        self.assertEqual(event.event_id, "good")
+        self.assertEqual(self.q("SELECT status FROM wake_events WHERE id='bad'")[0][0], "failed")
+
+    def test_inline_chat_turn_does_not_hold_the_background_lane(self):
+        bind_identity(self.db, provider="telegram", bot_id="workbot", external_user_id="111", principal_id="gao")
+        record_inbound(self.db, workspace_id="ws", platform="telegram", bot_id="workbot", update_id="1",
+                       chat_id="c", message_id="m", external_user_id="111", raw_source_ref=SRC)
+        t = self.task()
+        with closing(sqlite3.connect(self.db)) as c, c:
+            c.execute("INSERT INTO wake_events(id,workspace_id,task_id,origin,origin_event_id,kind,source_ref,created_at,updated_at)"
+                      " VALUES('timer','ws',?,'x','2','timer_fired','s',?,?)", (t, NOW, NOW))
+        self.assertEqual(Dispatcher(self.db, FakeHost(), clock=self.clock).claim("ws").event_id, "timer")
 
 
 if __name__ == "__main__":

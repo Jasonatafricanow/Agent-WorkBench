@@ -41,7 +41,13 @@ def render_dashboard(tasks, actor, database: str, now: str) -> str:
         tz = ZoneInfo(conn.execute("SELECT timezone FROM workspaces WHERE id=?", (actor.workspace_id,)).fetchone()[0])
         names = {r[0]: r[1] for r in conn.execute("SELECT id, display_name FROM principals")}
     ov = tasks.overview(actor=actor, limit=30)
-    news = tasks.changes_since(actor=actor, view="dashboard", limit=60, mark_seen=True)
+    # Read-only: the page never advances a "seen" watermark; it shows the latest changes instead.
+    with closing(connect(database)) as conn:
+        recent = [dict(r) for r in conn.execute(
+            """SELECT e.task_id, t.title, e.kind, e.actor_id, e.reason, e.occurred_at FROM task_events e
+               JOIN tasks t ON t.workspace_id=e.workspace_id AND t.id=e.task_id
+               WHERE e.workspace_id=? ORDER BY e.recorded_at DESC, e.rowid DESC LIMIT 40""",
+            (actor.workspace_id,))]
     stuck = stagnation(database, actor=actor, now=now)
     load = schedule_load(database, actor=actor, now=now)
     e = lambda s: escape(str(s or ""))
@@ -62,6 +68,11 @@ def render_dashboard(tasks, actor, database: str, now: str) -> str:
         return f"<a href='/task/{e(t['id'])}'>{e(t['title'])}</a><div class=meta>等：{on or '—'}</div>"
 
     sections = [
+        ("待审批", _list(ov["my_approvals"], lambda a: f"{e(a['request_summary'])}<div class=meta>/approve {e(a['id'])}"
+                                                    f"{' · 到期 ' + _local(a['expires_at'], tz) if a['expires_at'] else ''}</div>",
+                         empty="没有")),
+        ("结果不明、需要核对", _list(ov["unknown_outcomes"], lambda u: f"{e(u['kind'])} · {e(u['id'])}"
+                                                               f"<div class=meta>{_local(u['updated_at'], tz)}</div>", empty="没有")),
         ("需要我处理", _list(ov["my_human_actions"], lambda h: f"{e(h['title'])}<div class=meta>"
                                                           f"{e(h['request_kind'])} · {e(h['urgency'])}"
                                                           f"{' · 截止 ' + _local(h['due_at'], tz) if h['due_at'] else ''}</div>")),
@@ -74,7 +85,7 @@ def render_dashboard(tasks, actor, database: str, now: str) -> str:
                                                           f" · {e(c.get('due_local') or _local(c['due_at'], tz))}</div>")),
         ("交付物", _list(ov["deliverables_pending"], lambda d: f"{e(d['title'])}<div class=meta>{e(d['status'])} · 第 {d['revision']} 版</div>")),
         ("可做", _list(ov["ready"] + ov["doing"], task_line)),
-        ("自上次查看以来", _list(news["events"], lambda ev: f"{e(ev['title'])}：{e(ev['kind'])}<div class=meta>"
+        ("最近变化", _list(recent, lambda ev: f"<a href='/task/{e(ev['task_id'])}'>{e(ev['title'])}</a>：{KIND_LABELS.get(ev['kind'], e(ev['kind']))}<div class=meta>"
                                                          f"{_local(ev['occurred_at'], tz)} · {e(names.get(ev['actor_id'], ev['actor_id']))}"
                                                          f"{' · ' + e(ev['reason']) if ev['reason'] else ''}</div>",
                                  empty="没有新变化")),

@@ -12,7 +12,11 @@ skills, sessions or memory scope.
 | `agent/WORKBOT.md` | Working rules appended to the system prompt |
 | `turn-context.mjs` | The verified identity of the current Run (never chosen by the model) |
 
-Owner commands in Telegram: `/approve <id>`, `/deny <id>`.
+Owner commands in Telegram: `/approve <id>`, `/deny <id>` (the approver is notified with the id).
+
+Guarded tools (`WORKBOT_GUARDED_TOOLS`): `{"<tool>": {"action": "<business action>", "task_from": "task_id",
+"conditions_from": "<input field that, when truthy, triggers an approval condition>"}}`. A guarded call
+without a task id always needs approval.
 
 Status: written against Pi 1.5.2 APIs used by the companion gateway (`createAgentSession`,
 `SessionManager.open/continueRecent`, `tool_call` hook). The guard hook was exercised end to

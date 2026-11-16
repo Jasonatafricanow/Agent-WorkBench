@@ -84,8 +84,10 @@ class DeliveryOutbox:
                    WHERE o.workspace_id=? AND o.status='pending' AND (o.not_before IS NULL OR o.not_before<=?)
                    ORDER BY o.created_at LIMIT ?""", (workspace_id, now, limit)).fetchall()
             for row in rows:
-                stale = (row["task_state"] in ("DONE", "CANCELLED")) or (row["reminder_status"] == "cancelled") or (
-                    row["dep_status"] in ("resolved", "cancelled"))
+                # Only follow-ups go stale; a report such as "task X is done" must still reach the person.
+                stale = row["reminder_id"] is not None and (
+                    row["task_state"] in ("DONE", "CANCELLED") or row["reminder_status"] == "cancelled"
+                    or row["dep_status"] in ("resolved", "cancelled"))
                 if stale:
                     conn.execute("UPDATE delivery_outbox SET status='cancelled', updated_at=? WHERE id=?", (now, row["id"]))
                     continue

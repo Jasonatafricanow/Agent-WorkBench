@@ -29,8 +29,9 @@ def local_to_utc(local: str, tz_name: str) -> str:
     return naive.replace(tzinfo=ZoneInfo(tz_name)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def advance(local: str, frequency: str, interval_n: int) -> str:
-    """Next local occurrence; monthly keeps the day, clamped to the month length."""
+def advance(local: str, frequency: str, interval_n: int, anchor_day: int | None = None) -> str:
+    """Next local occurrence. Monthly targets `anchor_day` (default: the current day),
+    clamped to the month length, so a 31st schedule goes 01-31, 02-28, 03-31."""
     current = datetime.fromisoformat(local)
     if frequency == "daily":
         nxt = current + timedelta(days=interval_n)
@@ -39,7 +40,7 @@ def advance(local: str, frequency: str, interval_n: int) -> str:
     elif frequency == "monthly":
         month_index = current.month - 1 + interval_n
         year, month = current.year + month_index // 12, month_index % 12 + 1
-        day = min(current.day, calendar.monthrange(year, month)[1])
+        day = min(anchor_day or current.day, calendar.monthrange(year, month)[1])
         nxt = current.replace(year=year, month=month, day=day)
     else:
         raise InvalidOperation("frequency must be daily, weekly or monthly")
@@ -69,6 +70,8 @@ def _ensure_system(conn, now: str) -> None:
 
 def _wake(conn, ws: str, task_id: str | None, origin: str, origin_event_id: str, kind: str,
           source_ref: str, now: str) -> str:
+    if not source_ref or not str(source_ref).strip():
+        raise InvalidOperation("a wake event needs a source_ref")
     existing = conn.execute(
         "SELECT id FROM wake_events WHERE workspace_id=? AND origin=? AND origin_event_id=?",
         (ws, origin, origin_event_id)).fetchone()
@@ -139,7 +142,15 @@ def _fire_rule(conn, rule, now: str) -> list[dict]:
     ws = rule["workspace_id"]
     owner = conn.execute("SELECT owner_id FROM workspaces WHERE id=?", (ws,)).fetchone()[0]
     active = 1
-    for _ in range(50):  # catch up missed occurrences, bounded
+    anchor = rule["anchor_day"]
+    # After downtime only the most recent missed occurrence becomes work; older ones are skipped.
+    skipped = 0
+    for _ in range(1000):
+        nxt_local = advance(local, rule["frequency"], rule["interval_n"], anchor)
+        if local_to_utc(nxt_local, rule["timezone"]) > now or at > now:
+            break
+        local, at, skipped = nxt_local, local_to_utc(nxt_local, rule["timezone"]), skipped + 1
+    for _ in range(1):
         if at > now:
             break
         if conn.execute("SELECT 1 FROM schedule_occurrences WHERE rule_id=? AND occurrence_local=?",
@@ -160,9 +171,9 @@ def _fire_rule(conn, rule, now: str) -> list[dict]:
             conn.execute("INSERT INTO schedule_occurrences VALUES(?,?,?,?,?)",
                          (rule["id"], local, task_id, wake_id, now))
             out.append({"rule_id": rule["id"], "occurrence_local": local, "task_id": task_id,
-                        "wake_event_id": wake_id})
+                        "wake_event_id": wake_id, "skipped_before": skipped})
             count += 1
-        local = advance(local, rule["frequency"], rule["interval_n"])
+        local = advance(local, rule["frequency"], rule["interval_n"], anchor)
         at = local_to_utc(local, rule["timezone"])
         if (rule["max_occurrences"] is not None and count >= rule["max_occurrences"]) or (
                 rule["until_at"] is not None and at > rule["until_at"]):
@@ -178,6 +189,8 @@ def observe_watch(database: str | Path, *, workspace_id: str, watch_id: str, obs
                   source_ref: str, now: str) -> dict:
     """Called by a trusted adapter (GitHub poller, webhook). A match wakes the Host once
     and, if the watch guards a dependency, resolves it with verified-tool evidence."""
+    if not source_ref or not str(source_ref).strip():
+        raise InvalidOperation("source_ref is required")
     with write_transaction(database) as conn:
         _ensure_system(conn, now)
         watch = conn.execute("SELECT * FROM external_watches WHERE workspace_id=? AND id=?",
