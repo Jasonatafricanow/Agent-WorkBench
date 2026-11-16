@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS task_events (
   source_ref TEXT,
   occurred_at TEXT NOT NULL,
   recorded_at TEXT NOT NULL,
-  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id)
+  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id),
+  UNIQUE(workspace_id,id)
 );
 CREATE INDEX IF NOT EXISTS idx_task_events ON task_events(workspace_id,task_id,recorded_at);
 CREATE TABLE IF NOT EXISTS task_focus (
@@ -136,7 +137,8 @@ CREATE TABLE IF NOT EXISTS dependencies (
   created_at TEXT NOT NULL,
   resolved_at TEXT,
   FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id),
-  FOREIGN KEY(workspace_id,related_task_id) REFERENCES tasks(workspace_id,id)
+  FOREIGN KEY(workspace_id,related_task_id) REFERENCES tasks(workspace_id,id),
+  UNIQUE(workspace_id,id)
 );
 CREATE TABLE IF NOT EXISTS reminders (
   id TEXT PRIMARY KEY,
@@ -157,7 +159,9 @@ CREATE TABLE IF NOT EXISTS reminders (
   dedupe_key TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id)
+  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id),
+  FOREIGN KEY(workspace_id,dependency_id) REFERENCES dependencies(workspace_id,id),
+  UNIQUE(workspace_id,id)
 );
 CREATE INDEX IF NOT EXISTS idx_due_reminders ON reminders(status,due_at,lease_until);
 CREATE TABLE IF NOT EXISTS inbox_messages (
@@ -175,13 +179,17 @@ CREATE TABLE IF NOT EXISTS inbox_messages (
   received_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(platform,bot_id,update_id),
-  UNIQUE(platform,bot_id,chat_id,message_id)
+  UNIQUE(platform,bot_id,chat_id,message_id),
+  UNIQUE(workspace_id,id)
 );
 CREATE TABLE IF NOT EXISTS message_links (
-  inbox_id TEXT NOT NULL REFERENCES inbox_messages(id),
-  task_id TEXT NOT NULL REFERENCES tasks(id),
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  inbox_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
   relation TEXT NOT NULL CHECK(relation IN ('request','context','feedback','delivery')),
-  PRIMARY KEY(inbox_id,task_id,relation)
+  PRIMARY KEY(workspace_id,inbox_id,task_id,relation),
+  FOREIGN KEY(workspace_id,inbox_id) REFERENCES inbox_messages(workspace_id,id),
+  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id)
 );
 CREATE TABLE IF NOT EXISTS command_receipts (
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
@@ -193,7 +201,7 @@ CREATE TABLE IF NOT EXISTS command_receipts (
 );
 CREATE TABLE IF NOT EXISTS memory_outbox (
   id TEXT PRIMARY KEY,
-  task_event_id TEXT NOT NULL UNIQUE REFERENCES task_events(id),
+  task_event_id TEXT NOT NULL UNIQUE,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
   scope TEXT NOT NULL,
   source_ref TEXT NOT NULL,
@@ -202,13 +210,14 @@ CREATE TABLE IF NOT EXISTS memory_outbox (
   attempts INTEGER NOT NULL DEFAULT 0,
   lease_until TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(workspace_id,task_event_id) REFERENCES task_events(workspace_id,id)
 );
 CREATE TABLE IF NOT EXISTS delivery_outbox (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-  task_id TEXT REFERENCES tasks(id),
-  reminder_id TEXT REFERENCES reminders(id),
+  task_id TEXT,
+  reminder_id TEXT,
   recipient_principal_id TEXT NOT NULL REFERENCES principals(id),
   channel TEXT NOT NULL,
   payload_json TEXT NOT NULL,
@@ -219,7 +228,9 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
   lease_until TEXT,
   dedupe_key TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id),
+  FOREIGN KEY(workspace_id,reminder_id) REFERENCES reminders(workspace_id,id)
 );
 CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox_messages(workspace_id,status,received_at);
 

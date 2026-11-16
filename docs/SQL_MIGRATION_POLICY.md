@@ -22,3 +22,20 @@ must be preserved where a date-only deadline is entered.
 Treat SQLite as a single-writer service with its WAL, database and backup
 all confined to one trusted filesystem. Do not run two WorkBench writer
 containers against a shared NFS/SMB database file.
+
+
+## Workspace-level referential integrity hardening (2026-11-16)
+
+The initial schema now uses composite `(workspace_id,id)` foreign keys for
+`message_links`, `reminders.dependency_id`, `memory_outbox.task_event_id`,
+and `delivery_outbox`'s task/reminder links. The normalized `wake_events`
+and `approval_requests` already use composite workspace keys. This is
+defense in depth: every service operation **still** checks authenticated
+principal/role and object visibility before touching a row.
+
+This remains an **initial bootstrap schema**, not a migration for an existing
+persistent database. Before deploying into a nonempty DB, ship explicit,
+transaction-safe migration versions and backfill `message_links.workspace_id`
+from authenticated native source associations; reject inconsistent legacy
+links rather than inventing their workspace. Do not rely on
+`CREATE TABLE IF NOT EXISTS` to apply new foreign keys.
