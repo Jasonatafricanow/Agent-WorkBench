@@ -299,6 +299,8 @@ CREATE TABLE IF NOT EXISTS delegation_profiles (
     CHECK(json_valid(allowed_actions_json) AND json_type(allowed_actions_json)='array'),
   reversible_actions_json TEXT NOT NULL DEFAULT '[]'
     CHECK(json_valid(reversible_actions_json) AND json_type(reversible_actions_json)='array'),
+  review_actions_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(review_actions_json) AND json_type(review_actions_json)='array'),
   mandatory_approval_conditions_json TEXT NOT NULL DEFAULT '[]'
     CHECK(json_valid(mandatory_approval_conditions_json) AND json_type(mandatory_approval_conditions_json)='array'),
   success_criteria_json TEXT NOT NULL DEFAULT '[]'
@@ -341,6 +343,8 @@ CREATE TABLE IF NOT EXISTS task_responsibilities (
     CHECK(json_valid(effective_allowed_actions_json) AND json_type(effective_allowed_actions_json)='array'),
   effective_reversible_actions_json TEXT NOT NULL DEFAULT '[]'
     CHECK(json_valid(effective_reversible_actions_json) AND json_type(effective_reversible_actions_json)='array'),
+  effective_review_actions_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(effective_review_actions_json) AND json_type(effective_review_actions_json)='array'),
   effective_approval_conditions_json TEXT NOT NULL DEFAULT '[]'
     CHECK(json_valid(effective_approval_conditions_json) AND json_type(effective_approval_conditions_json)='array'),
   success_criteria_json TEXT NOT NULL DEFAULT '[]'
