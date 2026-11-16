@@ -37,9 +37,13 @@ class DelegationEnvelope:
     work_class: str
     autonomy_level: AutonomyLevel
     profile_max_level: AutonomyLevel
+    profile_allowed_actions: frozenset[str]
+    profile_reversible_actions: frozenset[str]
+    profile_approval_conditions: frozenset[str]
     allowed_actions: frozenset[str]
     reversible_actions: frozenset[str]
     approval_conditions: frozenset[str]
+    review_actions: frozenset[str]
     policy_version: int
 
     def __post_init__(self) -> None:
@@ -47,11 +51,24 @@ class DelegationEnvelope:
             raise ValueError("work_class is required")
         if self.autonomy_level > self.profile_max_level:
             raise ValueError("task autonomy cannot exceed the approved work-class profile")
+        if not self.allowed_actions.issubset(self.profile_allowed_actions):
+            raise ValueError("task actions cannot exceed the approved work-class allowlist")
+        if not self.reversible_actions.issubset(self.profile_reversible_actions):
+            raise ValueError("task cannot broaden the profile's reversible-action set")
         if not self.reversible_actions.issubset(self.allowed_actions):
-            raise ValueError("reversible actions must be within the allowed action set")
+            raise ValueError("reversible actions must be within the task allowlist")
+        if not self.profile_approval_conditions.issubset(self.approval_conditions):
+            raise ValueError("task cannot remove mandatory work-class approval conditions")
+        if not self.review_actions.issubset(self.allowed_actions):
+            raise ValueError("review actions must be within the task allowlist")
         if self.policy_version < 1:
             raise ValueError("policy_version must be positive")
-        if any(not item.strip() for item in self.allowed_actions | self.approval_conditions):
+        identifiers = (
+            self.profile_allowed_actions | self.profile_reversible_actions
+            | self.profile_approval_conditions | self.allowed_actions
+            | self.approval_conditions | self.review_actions
+        )
+        if any(not item.strip() for item in identifiers):
             raise ValueError("action and condition identifiers must be nonempty")
 
 
@@ -77,6 +94,8 @@ def route_action(
     if level == AutonomyLevel.AGENT_SUPERVISED:
         if action not in envelope.reversible_actions:
             return ActionRoute.HUMAN_APPROVAL_REQUIRED
+        return ActionRoute.AGENT_EXECUTE_WITH_REVIEW
+    if action in envelope.review_actions:
         return ActionRoute.AGENT_EXECUTE_WITH_REVIEW
     return ActionRoute.AGENT_EXECUTE
 
@@ -108,6 +127,21 @@ class PromotionEvidence:
     rework_count: int
     policy_violations: int
     evidence_complete: bool
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.completed_runs, self.verified_successes,
+            self.accepted_without_rework, self.rework_count,
+            self.policy_violations,
+        )
+        if any(value < 0 for value in counts):
+            raise ValueError("promotion evidence counts cannot be negative")
+        if self.verified_successes > self.completed_runs:
+            raise ValueError("verified successes cannot exceed completed runs")
+        if self.accepted_without_rework > self.verified_successes:
+            raise ValueError("accepted outcomes cannot exceed verified successes")
+        if self.rework_count > self.completed_runs:
+            raise ValueError("rework count cannot exceed completed runs")
 
 
 @dataclass(frozen=True, slots=True)
