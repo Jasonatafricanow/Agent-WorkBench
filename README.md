@@ -38,3 +38,4 @@ python -m unittest discover -s tests -v
 ## 冻结边界
 
 不要把任务数据库、Bot Token、原始会话记录、调度机制或业务状态机写入 MR-Mem 内核。语义来源经当前的 SourceRef 与宿主认可的 Semantic Admission 进入记忆；原始任务状态始终来自 WorkBench SQL。
+\n## Always-on architecture update (2026-11-16)\n\nThe independent WorkBench now includes a **business wake-event ledger** and a typed Agent Host handoff contract. This is not a new always-running Agent service. **Agent Host** retains Sessions/Runs/deferred tool calls; **Mind Runtime** retains cognition/wake intent; **MR-Mem** retains semantic memory. See [ADR-0002](docs/ADR-0002-ALWAYS-ON-OWNERSHIP.md) and [Host protocol](docs/HOST_RUN_PROTOCOL.md). The new code remains an integration foundation; Host/Telegram live wiring is not finished.\n

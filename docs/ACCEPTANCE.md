@@ -44,4 +44,4 @@
 - Security：跨 workspace scope、prompt injection、被撤权后的缓存、滥用查任务 ID。
 - Backup/Restore：真实 sqlite online backup + 关联 Host/MR 状态恢复演练。
 
-完成标准：所有 P0 自动化/人工场景通过，有可复查的测试证据；P1 作为正式功能交付需通过。不能以“Agent 看起来能回答”代替功能验收。
+完成标准：所有 P0 自动化/人工场景通过，有可复查的测试证据；P1 作为正式功能交付需通过。不能以“Agent 看起来能回答”代替功能验收。\n## Always-on readiness gates (2026-11-16)\n\n- [ ] Host Run accepts stable WorkBench event IDs idempotently; task status remains SQL-owned.\n- [ ] Timer-to-wake insertion is atomic; no timer directly calls an Agent.\n- [ ] Host-deferred call survives restart and resumes **only** on authorized, unexpired approval event.\n- [ ] Revoking user memory scope or tool execution privilege blocks later use even after a prior successful bind.\n- [ ] Unknown delivery and unknown Host Run are reconciled, not blindly re-sent.\n- [ ] Operational Run acknowledgements cannot become experiential memory evidence.\n- [ ] Authorized Agent A and Agent B observe same SQL task version independent of MR-Mem projection lag.\n\nImplementation and source boundaries: [ADR-0002](ADR-0002-ALWAYS-ON-OWNERSHIP.md).\n
