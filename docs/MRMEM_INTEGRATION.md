@@ -58,3 +58,31 @@ Telegram/其他 Host 输入 -> 宿主原文存储 + stable SourceRef
 - [ ] 用合成跨 Agent 历史验证：事件重复、宿主修订、检索时撤权、LCE 落后、MR-Mem 离线。
 
 **明确未实现**：本参考工程当前只有 `memory_outbox` 事务写入与领取/确认 API；没有真实 `SemanticAdmissionService.admit`/`PathAReader` 适配、语义编译器或运行时端点。这些必须在实际 Host 接线阶段完成并测试。
+
+## Always-on event and semantic admission policy (2026-11-16)
+
+Reference: [ADR-0002](ADR-0002-ALWAYS-ON-OWNERSHIP.md).
+`wake_events` is a **business-to-Host dispatch ledger**, not an MR-Mem
+admission feed. WorkBench events such as `timer_fired`, `host_run_completed`,
+`approval_sent` or delivery receipts are operational data. They must not
+automatically create a SemanticBlock that claims a person has a durable
+preference, commitment, changed emotion or relationship.
+
+Only selected source-backed `task_events` may become semantic candidates,
+under the Host's existing Semantic Authority. User speech, authenticated
+human approval and independent real-world evidence are distinct from Agent
+output or external-tool success. MR-Mem's `SourceRefReader` must validate
+current source revision, workspace and **the particular task/event visibility**
+at each read. A grant is rechecked after context bind; a shared workspace
+does not authorize one user to read all another user's evidence.
+
+A Host Session/Run never enters MR-Mem as a second truth store. Host owns
+deferred calls and checkpoint/resume. SQL task facts, business reminders and
+`wake_events` remain queryable even if memory projection is delayed.
+
+**Status correction:** `memory_outbox` currently exists as an SQL table,
+but a production memory-outbox writer/consumer with lease/retry and real
+`SemanticAdmissionService` integration has **not** been implemented in
+this remote WorkBench branch. Likewise, no actual Agent Host Run port has
+been connected. Existing `runtime_bridge` tests cover only the local
+event ledger and contract invariants.
