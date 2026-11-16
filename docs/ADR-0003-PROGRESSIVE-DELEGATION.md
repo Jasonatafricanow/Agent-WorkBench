@@ -73,7 +73,7 @@ Each workspace defines versioned `delegation_profiles` for work classes, for exa
 
 A profile defines:
 - maximum autonomy level approved by a human owner;
-- action allowlist and reversible-action subset;
+- action allowlist, reversible-action subset and mandatory post-execution review actions;
 - mandatory approval conditions;
 - success criteria and required evidence;
 - escalation and attention policy;
@@ -88,7 +88,7 @@ Each task has an effective `task_responsibilities` record. Its action set and au
 | 0 | `human_executes` | Explain, research or advise only; no execution | Performs the work |
 | 1 | `agent_prepares` | Prepare draft, data, checklist or proposed action | Reviews and commits/performs |
 | 2 | `agent_supervised` | Execute approved reversible/internal steps | Reviews before consequential or irreversible commit |
-| 3 | `agent_bounded` | Execute an explicit task-level allowlist within policy | Approves configured risk triggers and exceptions |
+| 3 | `agent_bounded` | Execute an explicit task-level allowlist within policy | Reviews configured actions; approves risk triggers and exceptions |
 | 4 | `agent_exception_only` | Handle routine class work inside the approved class envelope | Handles exceptions, changes goals/policy and overrides |
 
 Level 4 is not unrestricted autonomy. It remains bounded by the profile, action allowlist, approval conditions, evidence requirements, Host tool policy and human override. Promotion from level 3 to 4 must not expand to a new high-risk action class unless that action is separately authorized.
