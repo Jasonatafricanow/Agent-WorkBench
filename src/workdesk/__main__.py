@@ -43,7 +43,22 @@ def main(argv=None) -> int:
     pr.add_argument("--workspace", required=True)
     pr.add_argument("--owner", required=True)
     pr.add_argument("--file", required=True)
+    g = sub.add_parser("grant-memory", help="owner grants a member read/write on the workspace's work memory")
+    g.add_argument("--workspace", required=True)
+    g.add_argument("--principal", required=True)
+    g.add_argument("--by", required=True, help="granting owner principal")
+    g.add_argument("--capability", choices=["memory.read", "memory.write"], action="append", required=True)
     sub.add_parser("fire-timers")
+    ic = sub.add_parser("import-csv", help="import a monthly export (CSV) and reconcile it with the task pool")
+    ic.add_argument("--workspace", required=True)
+    ic.add_argument("--principal", required=True)
+    ic.add_argument("--source", required=True)
+    ic.add_argument("--period", required=True)
+    ic.add_argument("--file", required=True)
+    ic.add_argument("--map", default="{}", help='column renames, e.g. {"案号":"external_key","官方期限":"official_due_local"}')
+    bk = sub.add_parser("backup")
+    bk.add_argument("--to", required=True)
+    sub.add_parser("verify", help="integrity/restore check of a database file")
     s = sub.add_parser("serve")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8790)
@@ -63,6 +78,12 @@ def main(argv=None) -> int:
                       (a.workspace, a.title, a.owner, a.timezone, now))
             c.executemany("INSERT OR IGNORE INTO memberships(workspace_id,principal_id,role) VALUES(?,?,?)",
                           [(a.workspace, a.owner, "owner"), (a.workspace, a.agent, "editor")])
+            # Owner and the work Agent may use the workspace's work memory; nobody else by default.
+            for who in (a.owner, a.agent):
+                for cap in ("memory.read", "memory.write"):
+                    c.execute("""INSERT OR IGNORE INTO memory_context_grants(workspace_id,actor_principal_id,memory_user_id,
+                                   capability,granted_by_principal_id,grant_source_ref,created_at) VALUES(?,?,?,?,?,?,?)""",
+                              (a.workspace, who, f"workbench:{a.workspace}", cap, a.owner, "bootstrap", now))
         print("ok")
     elif a.cmd == "add-member":
         with write_transaction(a.db) as c:
@@ -79,6 +100,31 @@ def main(argv=None) -> int:
         spec = json.loads(open(a.file, encoding="utf-8").read())
         owner = ActorContext(a.workspace, a.owner, "owner", "cli")
         print(json.dumps(DelegationProfileAdmin(a.db).publish(owner=owner, **spec), ensure_ascii=False))
+    elif a.cmd == "grant-memory":
+        with write_transaction(a.db) as c:
+            role = c.execute("SELECT role FROM memberships WHERE workspace_id=? AND principal_id=? AND active=1",
+                             (a.workspace, a.by)).fetchone()
+            if role is None or role[0] != "owner":
+                print("only the workspace owner may grant memory access", file=sys.stderr)
+                return 2
+            for cap in a.capability:
+                c.execute("""INSERT OR REPLACE INTO memory_context_grants(workspace_id,actor_principal_id,memory_user_id,
+                               capability,granted_by_principal_id,grant_source_ref,created_at,revoked_at)
+                             VALUES(?,?,?,?,?,?,?,NULL)""",
+                          (a.workspace, a.principal, f"workbench:{a.workspace}", cap, a.by, "cli", utc_now()))
+        print("ok")
+    elif a.cmd == "import-csv":
+        from .imports import import_rows, rows_from_csv
+        rows = rows_from_csv(open(a.file, encoding="utf-8-sig").read(), json.loads(a.map))
+        actor = ActorContext(a.workspace, a.principal, "owner", "cli")
+        print(json.dumps(import_rows(a.db, actor=actor, source_name=a.source, period=a.period, rows=rows),
+                         ensure_ascii=False, indent=1))
+    elif a.cmd == "backup":
+        from .storage import backup
+        print(backup(a.db, a.to))
+    elif a.cmd == "verify":
+        from .storage import verify
+        print(json.dumps(verify(a.db), ensure_ascii=False, indent=1))
     elif a.cmd == "fire-timers":
         print(json.dumps(fire_due(a.db, now=utc_now()), ensure_ascii=False))
     elif a.cmd == "serve":

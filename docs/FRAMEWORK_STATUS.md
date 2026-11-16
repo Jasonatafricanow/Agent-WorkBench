@@ -47,5 +47,25 @@ asked for the full framework first; a detailed audit and fixes come next.
 12. Group chats: each person has their own model session.
 13. Owner-only changes (focus, delegation) made through Telegram must cite an inbox message the owner actually sent.
 
+## Design review round (2026-11-17): gaps found against the design docs and filled
+
+| Gap | Source in the docs | Now |
+|---|---|---|
+| Work memory was readable by anyone in a turn (incl. requesters) | ADR-0001/MR-Mem boundary | `/v1/memory/authorize` checks `memory_context_grants`; bootstrap grants owner + work Agent only; `grant-memory` CLI |
+| No automatic due reminders | DOMAIN_CONTRACT §6 | `notices.sweep`: official due today / within N days, soft due passed — once each |
+| No "chase every N days until answered" | DOMAIN_CONTRACT §6 | `set_reminder` `repeat_every_days` + `max_repeats`; a series stops when the dependency resolves |
+| Human requests were never announced | ADR-0003 §5 | `notify`/`interrupt` deliver at once; `batch` goes into the daily digest |
+| No daily digest | handoff §2 ("quiet", one summary) | digest at the owner's `digest_time`: routine decisions, inbox, waiting, overdue, stalled, overloaded days |
+| Expired approvals / overdue requests / commitments ignored | ADR-0003, F1 | approvals expire and wake the blocked session; overdue requests and commitments notify once |
+| Official due without evidence was only refused | ACCEPTANCE A07 | `propose_change` files a decision with current/proposed values |
+| Agent-to-agent handoff missing | ACCEPTANCE A39 | `handoff` by the current executor (same level, Agents only) + checkpoint + `agent_handoff` wake |
+| No soft-due rule | owner's workflow | owner pref `soft_due_rule` → `suggested_soft_due` with its basis, never auto-applied |
+| No monthly import | handoff W6 | `imports.import_rows` / `import-csv`: new → INBOX task; due moved → decision (no overwrite); missing → review; same file twice → no-op |
+| Projects not creatable | DOMAIN_CONTRACT | `create_project`, `update_project`; `project_id` validated |
+| Refused access not logged | ACCEPTANCE A04 | `access_denials` (who, action, code; no content) |
+| No backup / restore check | ACCEPTANCE A26 | `backup` (online, keeps 14, daily when `WORKBENCH_BACKUP_DIR` set), `verify` |
+| Dashboard lacked "due this week", "upcoming follow-ups" | DOMAIN_CONTRACT §7 | added |
+
 Remaining known gaps: the Telegram gateway has not run with a real bot token; MR-Mem
-side of the memory pointer queue is not consumed; message deletions are not tracked.
+side of the memory pointer queue is not consumed; message deletions and attachments are
+not handled; dashboard has no filters by project/requester yet.

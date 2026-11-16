@@ -84,6 +84,10 @@ def render_dashboard(tasks, actor, database: str, now: str) -> str:
                                                           f"{'我欠' if c['direction'] == 'owner_owes' else '欠我' if c['direction'] == 'owed_to_owner' else '他人'}"
                                                           f" · {e(c.get('due_local') or _local(c['due_at'], tz))}</div>")),
         ("交付物", _list(ov["deliverables_pending"], lambda d: f"{e(d['title'])}<div class=meta>{e(d['status'])} · 第 {d['revision']} 版</div>")),
+        ("本周到期", _list(ov["due_this_week"], task_line)),
+        ("即将催促/提醒", _list(ov["upcoming_followups"], lambda r: f"<a href='/task/{e(r['task_id'])}'>{e(r['title'])}</a>"
+                                                         f"<div class=meta>{_local(r['due_at'], tz)} · 给 {e(names.get(r['recipient_principal_id'], ''))}"
+                                                         f"{' · 还会重复 ' + str(r['repeats_left']) + ' 次' if r['repeats_left'] else ''}</div>")),
         ("可做", _list(ov["ready"] + ov["doing"], task_line)),
         ("最近变化", _list(recent, lambda ev: f"<a href='/task/{e(ev['task_id'])}'>{e(ev['title'])}</a>：{KIND_LABELS.get(ev['kind'], e(ev['kind']))}<div class=meta>"
                                                          f"{_local(ev['occurred_at'], tz)} · {e(names.get(ev['actor_id'], ev['actor_id']))}"

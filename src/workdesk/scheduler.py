@@ -126,6 +126,19 @@ def fire_due(database: str | Path, *, now: str, batch: int = 100) -> dict:
             conn.execute("UPDATE reminders SET status='sent', attempts=attempts+1, updated_at=? WHERE id=?",
                          (now, r["id"]))
             fired.append({"reminder_id": r["id"], "wake_event_id": wake_id})
+            if r["repeat_every_days"] and (r["repeats_left"] or 0) > 0:
+                # "every Wednesday until they answer": the next one is a new row in the same series,
+                # so cancelling the series (dependency resolved, task closed) stops all of it.
+                nxt = (datetime.fromisoformat(r["due_at"][:-1]) + timedelta(days=r["repeat_every_days"])
+                       ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                series = r["series_id"] or r["id"]
+                conn.execute(
+                    """INSERT OR IGNORE INTO reminders(id,workspace_id,task_id,dependency_id,due_at,timezone,kind,condition,
+                         recipient_principal_id,channel,dedupe_key,created_at,updated_at,repeat_every_days,repeats_left,series_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (_new("rem"), r["workspace_id"], r["task_id"], r["dependency_id"], nxt, r["timezone"], r["kind"],
+                     r["condition"], r["recipient_principal_id"], r["channel"], f"{series}:{nxt}", now, now,
+                     r["repeat_every_days"], r["repeats_left"] - 1, series))
 
         rules = conn.execute(
             "SELECT * FROM schedule_rules WHERE active=1 AND next_fire_at<=? ORDER BY next_fire_at LIMIT ?",

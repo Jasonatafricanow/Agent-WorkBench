@@ -108,6 +108,7 @@ class WorkbenchApp:
                 workspace_id=ws, delivery_id=body["delivery_id"], status=body["status"],
                 provider_message_id=body.get("provider_message_id")),
             "/v1/delivery/report": lambda: self.delivery.report(workspace_id=ws),
+            "/v1/memory/authorize": lambda: self._memory_authorize(body),
             "/v1/memory/enqueue": lambda: self.memory.enqueue(
                 workspace_id=ws, task_event_id=body["task_event_id"], scope=body.get("scope", "workspace"),
                 source_ref=body["source_ref"]),
@@ -115,6 +116,10 @@ class WorkbenchApp:
             "/v1/memory/settle": lambda: self.memory.settle(workspace_id=ws, pointer_id=body["pointer_id"],
                                                             status=body["status"]),
             "/v1/timers/fire": lambda: fire_due(self.db, now=now),
+            "/v1/notices/sweep": lambda: __import__("workdesk.notices", fromlist=["sweep"]).sweep(self.db, now=now),
+            "/v1/imports/rows": lambda: __import__("workdesk.imports", fromlist=["import_rows"]).import_rows(
+                self.db, actor=self.actor(body), source_name=body["source_name"], period=body["period"],
+                rows=body["rows"], clock=self.clock),
             "/v1/watches/observe": lambda: observe_watch(
                 self.db, workspace_id=ws, watch_id=body["watch_id"], observed_value=str(body["observed_value"]),
                 source_ref=body["source_ref"], now=now),
@@ -140,6 +145,20 @@ class WorkbenchApp:
                                    (ws, event["origin_event_id"])).fetchone() if event["origin"] == "workbench.timer" else None
             event["recipient_id"] = rem["recipient_principal_id"] if rem else None
         return event
+
+    def _memory_authorize(self, body: dict) -> dict:
+        """Work memory is a USER-scope like any other: only principals with an explicit grant
+        may search or write it. A requester has none unless the owner grants one."""
+        from .user_context import SqlMemoryGrantChecker
+        actor = self.actor(body)
+        action = body.get("action")
+        try:
+            SqlMemoryGrantChecker(self.db).assert_allowed(
+                principal_id=actor.principal_id, workspace_id=actor.workspace_id,
+                user_id=f"workbench:{actor.workspace_id}", action=action)
+        except PermissionError:
+            raise Forbidden("memory access denied")
+        return {"allowed": True, "memory_user_id": f"workbench:{actor.workspace_id}"}
 
     def check_host(self, header: str | None) -> bool:
         expected = f"Bearer {self.host_token}"
@@ -230,18 +249,25 @@ def make_handler(app: WorkbenchApp):
 def serve(app: WorkbenchApp, *, host: str = "127.0.0.1", port: int = 8790, timer_seconds: int = 30) -> None:
     stop = threading.Event()
 
+    import os
+    from .notices import sweep
     from .promotion import review_delegations
+    from .storage import backup
     from .watchers import poll_watches
+    backup_dir = os.environ.get("WORKBENCH_BACKUP_DIR")
 
     def timers():
         ticks = 0
         while not stop.wait(timer_seconds):
             ticks += 1
-            jobs = [("timers", lambda: fire_due(app.db, now=app.clock()))]
+            jobs = [("timers", lambda: fire_due(app.db, now=app.clock())),
+                    ("notices", lambda: sweep(app.db, now=app.clock()))]
             if ticks % max(1, 300 // timer_seconds) == 0:       # every ~5 minutes
                 jobs.append(("watches", lambda: poll_watches(app.db, now=app.clock())))
             if ticks % max(1, 86400 // timer_seconds) == 1:     # once a day (and at start)
                 jobs.append(("delegation review", lambda: review_delegations(app.db, now=app.clock())))
+                if backup_dir:
+                    jobs.append(("backup", lambda: backup(app.db, backup_dir)))
             for name, job in jobs:
                 try:
                     job()

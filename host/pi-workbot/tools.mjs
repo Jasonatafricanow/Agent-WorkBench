@@ -42,6 +42,12 @@ export function createWorkbenchTools(sessionManager) {
     catch (error) { return { ...out({ error: error.code || 'ERROR', message: error.message, details: error.details }), isError: true }; }
   };
   const memory = async (path, body, { retry = false } = {}) => {
+    // The verified sender must hold a memory grant for this workspace (requesters normally do not).
+    try {
+      await wb('/v1/memory/authorize', { identity: turn().identity, action: path === '/search' ? 'memory.read' : 'memory.write' });
+    } catch {
+      return { ...out({ error: 'MEMORY_FORBIDDEN', message: 'no memory access for this person' }), isError: true };
+    }
     try {
       const response = await fetch(MEM + path, {
         method: 'POST', signal: AbortSignal.timeout(8000),
@@ -68,7 +74,7 @@ export function createWorkbenchTools(sessionManager) {
       parameters: Type.Object({ task_id: Type.String({ minLength: 1 }) }),
       execute: async (_id, { task_id }) => call('/v1/tools/get_task', { task_id }) },
     { name: 'change_tasks', label: '更新工作台',
-      description: 'Apply 1-40 operations atomically (all or nothing). Ops: create_task, patch_task, set_official_due, transition, append_progress, set_focus(owner), add_dependency, resolve_dependency, set_reminder, cancel_reminder, link_inbox, request_human_action, respond_human_action, record_commitment, update_commitment, register_deliverable, update_deliverable, save_checkpoint, create_schedule, set_schedule_active, add_watch, assign_responsibility(owner), set_responsibility_status(owner). Every op needs evidence_type (explicit_user|verified_tool|reported_third_party|inferred|system). Use "ref" to name a new object and "$ref" to use it later in the batch.',
+      description: 'Apply 1-40 operations atomically (all or nothing). Ops: create_task, patch_task, set_official_due, transition, append_progress, set_focus(owner), add_dependency, resolve_dependency, set_reminder, cancel_reminder, link_inbox, request_human_action, respond_human_action, record_commitment, update_commitment, register_deliverable, update_deliverable, save_checkpoint, create_schedule, set_schedule_active, add_watch, assign_responsibility(owner), set_responsibility_status(owner), propose_change, create_project, update_project, handoff. set_reminder accepts repeat_every_days + max_repeats for chasing until answered. Every op needs evidence_type (explicit_user|verified_tool|reported_third_party|inferred|system). Use "ref" to name a new object and "$ref" to use it later in the batch.',
       parameters: Type.Object({ operations: Type.Array(Type.Record(Type.String(), Type.Any()), { minItems: 1, maxItems: 40 }) }),
       execute: async (toolCallId, { operations }) => {
         const current = turn();

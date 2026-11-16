@@ -98,6 +98,11 @@ def _local_to_utc(local_at: Any, tz_name: Any) -> str:
     return naive.replace(tzinfo=zone).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _plus_days(now: str, days: int) -> str:
+    from datetime import timedelta
+    return (datetime.fromisoformat(now[:-1]) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _text(value: Any, field: str, *, required: bool = False) -> str:
     if value is None and not required:
         return ""
@@ -173,10 +178,27 @@ class SqliteTaskService:
         return conn.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
 
     # -------------------------------------------------------------------- reads
+    def _denied(self, actor: ActorContext, action: str, code: str) -> None:
+        """Write the refusal in its own transaction (the failed one rolls back). No content, no target id."""
+        import threading
+        def write():
+            try:
+                with write_transaction(self._database) as conn:
+                    conn.execute("INSERT INTO access_denials VALUES(?,?,?,?,?)",
+                                 (actor.workspace_id, actor.principal_id, action, code, self._clock()))
+            except Exception:  # noqa: BLE001 - auditing must never break the caller
+                pass
+        # The failing apply still holds the write lock; record after it is released.
+        threading.Timer(0.05, write).start()
+
     def read(self, *, actor: ActorContext, task_id: str) -> dict[str, Any]:
         with read_snapshot(self._database) as conn:
             role = self._role(conn, actor)
-            task = self._visible_task(conn, actor, role, task_id)
+            try:
+                task = self._visible_task(conn, actor, role, task_id)
+            except NotFound:
+                self._denied(actor, "read", "NOT_FOUND")
+                raise
             if role == "requester":
                 return {"view": "requester", "task": self._requester_view(task),
                         "notes": [dict(r) for r in conn.execute(
@@ -258,6 +280,13 @@ class SqliteTaskService:
                     "state NOT IN ('DONE','CANCELLED') AND ((soft_due_at IS NOT NULL AND soft_due_at<?)"
                     " OR (official_due_at IS NOT NULL AND official_due_at<?))", (now, now),
                     order="COALESCE(official_due_at, soft_due_at), id"),
+                "due_this_week": tasks(
+                    "state NOT IN ('DONE','CANCELLED') AND COALESCE(official_due_at, soft_due_at) BETWEEN ? AND ?",
+                    (now, _plus_days(now, 7)), order="COALESCE(official_due_at, soft_due_at), id"),
+                "upcoming_followups": [dict(r) for r in conn.execute(
+                    """SELECT r.id, r.task_id, t.title, r.due_at, r.kind, r.recipient_principal_id, r.repeats_left
+                       FROM reminders r JOIN tasks t ON t.workspace_id=r.workspace_id AND t.id=r.task_id
+                       WHERE r.workspace_id=? AND r.status='scheduled' ORDER BY r.due_at LIMIT ?""", (ws, limit))],
                 "commitments_open": [dict(r) | {"direction": "owner_owes" if r["promisor_id"] == owner_id
                                                 else "owed_to_owner" if r["promisee_id"] == owner_id
                                                 else "third_party"}
@@ -371,6 +400,8 @@ class SqliteTaskService:
                     results.append(batch.run(op))
                 except WorkbenchError as exc:
                     exc.details.setdefault("op_index", index)
+                    if exc.code in ("FORBIDDEN", "NOT_FOUND"):
+                        self._denied(actor, f"apply:{op.get('op')}", exc.code)
                     raise
             batch.finish(results)
             conn.execute(
@@ -637,8 +668,33 @@ class _Batch:
         kind = "delayed" if task["official_due_at"] and due_at > task["official_due_at"] else "official_due_set"
         if kind == "delayed":
             after = dict(after, delay_kind=op["delay_kind"])
-        return {"task_id": task["id"], "official_due_at": due_at,
+        suggestion = None if task["soft_due_at"] else self.suggest_soft_due(due_at, tz_name)
+        if suggestion:
+            after = dict(after, suggested_soft_due=suggestion)
+        return {"task_id": task["id"], "official_due_at": due_at, "suggested_soft_due": suggestion,
                 "event_id": self.event(task["id"], kind, op, evidence, before=before, after=after)}
+
+    def suggest_soft_due(self, official_due_at: str, tz_name: str) -> dict | None:
+        """Owner's rule, e.g. {"soft_due_rule": {"days_before": 3, "skip_weekends": true, "at": "18:00"}}.
+        Only a suggestion with its basis; it becomes soft_due when someone patches it in."""
+        row = self.c.execute(
+            "SELECT work_preferences_json FROM user_profiles WHERE workspace_id=? AND principal_id=?",
+            (self.ws, self.owner_id)).fetchone()
+        rule = json.loads(row["work_preferences_json"]).get("soft_due_rule") if row else None
+        if not rule:
+            return None
+        from datetime import timedelta
+        zone = ZoneInfo(tz_name)
+        day = datetime.fromisoformat(official_due_at[:-1] + "+00:00").astimezone(zone).date()
+        left = int(rule.get("days_before", 3))
+        while left > 0:
+            day -= timedelta(days=1)
+            if rule.get("skip_weekends", True) and day.weekday() >= 5:
+                continue
+            left -= 1
+        local = f"{day.isoformat()}T{rule.get('at', '18:00')}"
+        return {"soft_due_at": _local_to_utc(local, tz_name), "local": local,
+                "basis": f"官方截止前 {rule.get('days_before', 3)} 个{'工作日' if rule.get('skip_weekends', True) else '天'}"}
 
     # ------------------------------------------------- commitments/deliverables
     def op_record_commitment(self, op: dict, evidence: str) -> dict:
@@ -830,6 +886,81 @@ class _Batch:
                 "event_id": self.event(task["id"], "watch_added", op, evidence,
                                        after={"watch_id": watch_id, "dependency_id": dep_id, **values})}
 
+    # --------------------------------------------- proposals, projects, handoff
+    def op_propose_change(self, op: dict, evidence: str) -> dict:
+        """When the evidence is not enough to change something (e.g. an official due someone mentioned),
+        file a decision for the owner with the proposed values instead of overwriting."""
+        task = self.task(op, check_version=False)
+        fields = _obj(op.get("fields"), "fields")
+        if not fields or set(fields) - set(PATCHABLE) - {"official_due_local"}:
+            raise InvalidOperation("fields must be patchable task fields", field="fields")
+        request_id = self.s._new_id("hum")
+        self.c.execute(
+            """INSERT INTO human_action_requests(id,workspace_id,task_id,requested_by_principal_id,assignee_principal_id,
+                 request_kind,title,request_json,urgency,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (request_id, self.ws, task["id"], self.actor.principal_id, self.owner_id, "decision",
+             _text(op.get("title"), "title") or f"确认修改：{task['title']}",
+             _dumps({"kind": "proposed_change", "fields": fields,
+                     "current": {k: task[k] for k in fields if k in task.keys()},
+                     "reason": _text(op.get("reason"), "reason"), "source_ref": op.get("source_ref")}),
+             op.get("urgency", "batch"), self.now, self.now))
+        return {"task_id": task["id"], "human_action_id": request_id,
+                "event_id": self.event(task["id"], "change_proposed", op, evidence,
+                                       after={"human_action_id": request_id, "fields": fields})}
+
+    def op_create_project(self, op: dict, evidence: str) -> dict:
+        project_id = self.s._new_id("prj")
+        self.c.execute(
+            "INSERT INTO projects(id,workspace_id,title,goal,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (project_id, self.ws, _text(op.get("title"), "title", required=True), _text(op.get("goal"), "goal"),
+             self.now, self.now))
+        self.bind(op, project_id)
+        return {"project_id": project_id}
+
+    def op_update_project(self, op: dict, evidence: str) -> dict:
+        pid = self.ref(op.get("project_id"))
+        row = self.c.execute("SELECT * FROM projects WHERE workspace_id=? AND id=?", (self.ws, pid)).fetchone()
+        if row is None:
+            raise NotFound("project not found")
+        state = op.get("state", row["state"])
+        if state not in ("active", "paused", "done", "cancelled"):
+            raise InvalidOperation("state must be active, paused, done or cancelled", field="state")
+        self.c.execute("UPDATE projects SET title=?, goal=?, state=?, updated_at=? WHERE id=?",
+                       (_text(op.get("title"), "title") or row["title"],
+                        _text(op.get("goal"), "goal") if op.get("goal") is not None else row["goal"],
+                        state, self.now, pid))
+        return {"project_id": pid, "state": state}
+
+    def op_handoff(self, op: dict, evidence: str) -> dict:
+        """The current executor (an Agent) passes the task to another Agent at the same level or lower,
+        leaving a checkpoint. Raising autonomy or handing to a human stays the owner's call."""
+        task = self.task(op)
+        resp = self.c.execute("SELECT * FROM task_responsibilities WHERE workspace_id=? AND task_id=?",
+                              (self.ws, task["id"])).fetchone()
+        if resp is None or resp["status"] != "active" or resp["current_executor_id"] != self.actor.principal_id:
+            raise Forbidden("only the current executor of an active delegation can hand off")
+        target = self.member(op.get("to_executor_id"), "to_executor_id")
+        if not self._is_agent(target) or target == self.actor.principal_id:
+            raise InvalidOperation("handoff goes to another Agent; handing to a human is the owner's decision")
+        next_action = _text(op.get("next_action"), "next_action", required=True)
+        self.op_save_checkpoint(dict(op, next_action=next_action), evidence)
+        self.c.execute(
+            """UPDATE task_responsibilities SET current_executor_id=?, version=version+1, updated_by_principal_id=?,
+                 updated_at=? WHERE workspace_id=? AND task_id=?""",
+            (target, self.actor.principal_id, self.now, self.ws, task["id"]))
+        profile = self.s._profile(self.c, self.ws, resp["profile_id"]) if resp["profile_id"] else None
+        self._responsibility_event(task["id"], "delegated", dict(op, reason=_text(op.get("reason"), "reason") or "handoff"),
+                                   resp, target, resp["autonomy_level"], profile)
+        wake_id = self.s._new_id("wake")
+        self.c.execute(
+            """INSERT INTO wake_events(id,workspace_id,task_id,origin,origin_event_id,kind,source_ref,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (wake_id, self.ws, task["id"], "workbench.handoff", self.s._new_id("ho"), "agent_handoff",
+             f"workdesk://{self.ws}/tasks/{task['id']}/handoff", self.now, self.now))
+        return {"task_id": task["id"], "to_executor_id": target, "wake_event_id": wake_id,
+                "event_id": self.event(task["id"], "handoff", op, evidence,
+                                       after={"from": self.actor.principal_id, "to": target})}
+
     def op_transition(self, op: dict, evidence: str) -> dict:
         task = self.task(op)
         target, current = op.get("to"), task["state"]
@@ -974,6 +1105,10 @@ class _Batch:
             raise InvalidOperation("dependency_id must be an open dependency of this task")
         kind = op.get("kind", "followup")
         condition = op.get("condition", "if_still_waiting" if dep_id else "if_open")
+        every, repeats = op.get("repeat_every_days"), op.get("max_repeats")
+        if every is not None and (type(every) is not int or not 1 <= every <= 90
+                                  or type(repeats) is not int or not 1 <= repeats <= 20):
+            raise InvalidOperation("repeating follow-ups need repeat_every_days 1..90 and max_repeats 1..20")
         recipient = self.member(op.get("recipient_principal_id") or self.owner_id, "recipient_principal_id")
         dedupe = op.get("dedupe_key") or f"{self.ws}:{task['id']}:{kind}:{due_at}:{dep_id or ''}:{recipient}"
         existing = self.c.execute("SELECT id,task_id,due_at FROM reminders WHERE dedupe_key=?", (dedupe,)).fetchone()
@@ -985,10 +1120,11 @@ class _Batch:
         try:
             self.c.execute(
                 """INSERT INTO reminders(id,workspace_id,task_id,dependency_id,due_at,timezone,kind,condition,
-                     recipient_principal_id,dedupe_key,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     recipient_principal_id,dedupe_key,created_at,updated_at,repeat_every_days,repeats_left,series_id)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (reminder_id, self.ws, task["id"], dep_id, due_at, tz_name, kind, condition,
-                 recipient, dedupe, self.now, self.now))
+                 recipient, dedupe, self.now, self.now, every, (repeats - 1) if every else None,
+                 reminder_id if every else None))
         except sqlite3.IntegrityError as exc:
             raise InvalidOperation(f"invalid reminder: {exc}") from exc
         self.bind(op, reminder_id)
@@ -1045,6 +1181,13 @@ class _Batch:
         except sqlite3.IntegrityError as exc:
             raise InvalidOperation("assignee must be an active human member") from exc
         self.bind(op, request_id)
+        if urgency in ("notify", "interrupt"):
+            self.c.execute(
+                """INSERT INTO delivery_outbox(id,workspace_id,task_id,recipient_principal_id,channel,payload_json,
+                     dedupe_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (self.s._new_id("dlv-out"), self.ws, task["id"], assignee, "telegram",
+                 _dumps({"text": ("【急】" if urgency == "interrupt" else "") + "需要你处理：" + _text(op.get("title"), "title"),
+                         "human_action_id": request_id}), f"human:{request_id}", self.now, self.now))
         return {"task_id": task["id"], "human_action_id": request_id,
                 "event_id": self.event(task["id"], "human_action_requested", op, evidence, after={
                     "human_action_id": request_id, "assignee": assignee, "kind": kind, "urgency": urgency})}

@@ -84,6 +84,34 @@ def migrate(database: str | Path, *, backup_to: str | Path | None = None) -> lis
     return applied
 
 
+def backup(database: str | Path, target_dir: str | Path, *, keep: int = 14) -> Path:
+    """Online backup (consistent while the service runs) to target_dir; keeps the newest `keep`."""
+    target_dir = Path(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"workbench-{utc_now().replace(':', '').replace('-', '')}.sqlite"
+    with closing(connect(database)) as src, closing(sqlite3.connect(str(target))) as dst:
+        src.backup(dst)
+    for old in sorted(target_dir.glob("workbench-*.sqlite"))[:-keep]:
+        old.unlink(missing_ok=True)
+    return target
+
+
+def verify(database: str | Path) -> dict:
+    """Restore check: integrity, foreign keys, schema version and what a restored copy still knows."""
+    with closing(connect(database)) as conn:
+        counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                  for t in ("tasks", "task_events", "reminders", "delivery_outbox", "wake_events")}
+        return {
+            "integrity": conn.execute("PRAGMA integrity_check").fetchone()[0],
+            "foreign_key_problems": len(conn.execute("PRAGMA foreign_key_check").fetchall()),
+            "schema_version": conn.execute("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetchone()[0],
+            "counts": counts,
+            "future_reminders": conn.execute("SELECT COUNT(*) FROM reminders WHERE status='scheduled'").fetchone()[0],
+            # Already-sent messages stay `sent`; a restored copy must not re-send them.
+            "sent_messages": conn.execute("SELECT COUNT(*) FROM delivery_outbox WHERE status='sent'").fetchone()[0],
+        }
+
+
 def _statements(script: str) -> list[str]:
     """Split a migration file into statements (no triggers with inner ';' here)."""
     lines = [line for line in script.splitlines() if not line.strip().startswith("--")]

@@ -30,4 +30,12 @@ python -m workdesk --db ... bind-identity --provider telegram --bot-id workbot -
 python -m workdesk --db ... bind-identity --provider host --bot-id workbot --external-user-id agent --principal agent
 python -m workdesk --db ... add-member --workspace work --principal gao --name 高老师 --role requester
 python -m workdesk --db ... bind-identity --provider telegram --bot-id workbot --external-user-id <gao tg id> --principal gao
+# monthly export from the internal system (columns renamed to external_key / title / official_due_local)
+python -m workdesk --db ... import-csv --workspace work --principal owner --source internal --period 2026-12 --file due.csv --map '{"案号":"external_key","名称":"title","官方期限":"official_due_local"}'
+python -m workdesk --db ... backup --to /data/backups
+python -m workdesk --db /data/backups/<file> verify
 ```
+
+Owner preferences (`user_profiles.work_preferences_json` for the owner):
+`{"digest_time": "09:00", "due_soon_days": 3, "quiet_hours": {"start": "23:00", "end": "08:00"},
+"soft_due_rule": {"days_before": 3, "skip_weekends": true, "at": "18:00"}}`
