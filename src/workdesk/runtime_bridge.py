@@ -42,7 +42,8 @@ def _utc(value: str) -> str:
 
 KINDS = frozenset({
     "user_message", "timer_fired", "external_change", "approval_decided",
-    "agent_handoff",
+    "agent_handoff", "human_action_completed", "delegation_review_due",
+    "responsibility_changed",
 })
 OUTCOMES = frozenset({"completed", "deferred", "failed"})
 

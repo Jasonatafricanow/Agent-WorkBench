@@ -116,6 +116,15 @@ class WakeEventTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 self.store.enqueue(foreign)
 
+    def test_human_participation_events_are_accepted(self):
+        for kind in ("human_action_completed", "delegation_review_due", "responsibility_changed"):
+            event = WakeEvent(
+                workspace_id="w1", event_id=f"wake-{kind}", origin="workbench",
+                origin_event_id=f"source-{kind}", kind=kind,
+                source_ref=f"workbench://{kind}", created_at=NOW,
+            )
+            self.assertTrue(self.store.enqueue(event))
+
     def test_invalid_date_or_kind_is_rejected(self):
         with self.assertRaises(ValueError):
             WakeEvent("w1", "wake-3", "timer", "timer-3", "RunNow",

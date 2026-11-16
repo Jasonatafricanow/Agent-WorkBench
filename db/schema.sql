@@ -245,7 +245,8 @@ CREATE TABLE IF NOT EXISTS wake_events (
   origin_event_id TEXT NOT NULL,
   kind TEXT NOT NULL CHECK(kind IN (
     'user_message','timer_fired','external_change',
-    'approval_decided','agent_handoff')),
+    'approval_decided','agent_handoff','human_action_completed',
+    'delegation_review_due','responsibility_changed')),
   source_ref TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
     'pending','leased','completed','deferred','failed','unknown')),
@@ -283,3 +284,154 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   FOREIGN KEY(workspace_id,wake_event_id) REFERENCES wake_events(workspace_id,id),
   FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id)
 );
+
+
+-- Progressive Delegation: human participation and per-work-class autonomy.
+-- Profiles are versioned and owner-approved; a task assignment can only narrow them.
+CREATE TABLE IF NOT EXISTS delegation_profiles (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  work_class TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  max_autonomy_level TEXT NOT NULL CHECK(max_autonomy_level IN (
+    'human_executes','agent_prepares','agent_supervised','agent_bounded','agent_exception_only')),
+  allowed_actions_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(allowed_actions_json) AND json_type(allowed_actions_json)='array'),
+  reversible_actions_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(reversible_actions_json) AND json_type(reversible_actions_json)='array'),
+  mandatory_approval_conditions_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(mandatory_approval_conditions_json) AND json_type(mandatory_approval_conditions_json)='array'),
+  success_criteria_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(success_criteria_json) AND json_type(success_criteria_json)='array'),
+  evidence_requirements_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(evidence_requirements_json) AND json_type(evidence_requirements_json)='array'),
+  escalation_policy_json TEXT NOT NULL DEFAULT '{}'
+    CHECK(json_valid(escalation_policy_json) AND json_type(escalation_policy_json)='object'),
+  promotion_policy_json TEXT NOT NULL DEFAULT '{}'
+    CHECK(json_valid(promotion_policy_json) AND json_type(promotion_policy_json)='object'),
+  auto_promotion_enabled INTEGER NOT NULL DEFAULT 0 CHECK(auto_promotion_enabled IN (0,1)),
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','retired')),
+  created_by_principal_id TEXT NOT NULL,
+  approved_by_principal_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(workspace_id,id),
+  UNIQUE(workspace_id,id,work_class),
+  UNIQUE(workspace_id,work_class,version),
+  FOREIGN KEY(workspace_id,created_by_principal_id)
+    REFERENCES memberships(workspace_id,principal_id),
+  FOREIGN KEY(workspace_id,approved_by_principal_id)
+    REFERENCES memberships(workspace_id,principal_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_delegation_profile
+  ON delegation_profiles(workspace_id,work_class) WHERE status='active';
+
+-- tasks.assignee_id remains the accountable owner; current_executor_id is
+-- the person/Agent responsible for the next executable step.
+CREATE TABLE IF NOT EXISTS task_responsibilities (
+  workspace_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  current_executor_id TEXT NOT NULL,
+  profile_id TEXT,
+  work_class TEXT NOT NULL,
+  autonomy_level TEXT NOT NULL CHECK(autonomy_level IN (
+    'human_executes','agent_prepares','agent_supervised','agent_bounded','agent_exception_only')),
+  effective_allowed_actions_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(effective_allowed_actions_json) AND json_type(effective_allowed_actions_json)='array'),
+  effective_reversible_actions_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(effective_reversible_actions_json) AND json_type(effective_reversible_actions_json)='array'),
+  effective_approval_conditions_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(effective_approval_conditions_json) AND json_type(effective_approval_conditions_json)='array'),
+  success_criteria_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(success_criteria_json) AND json_type(success_criteria_json)='array'),
+  evidence_requirements_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(evidence_requirements_json) AND json_type(evidence_requirements_json)='array'),
+  escalation_policy_json TEXT NOT NULL DEFAULT '{}'
+    CHECK(json_valid(escalation_policy_json) AND json_type(escalation_policy_json)='object'),
+  profile_version INTEGER NOT NULL DEFAULT 1 CHECK(profile_version >= 1),
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','paused','revoked')),
+  version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+  updated_by_principal_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(workspace_id,task_id),
+  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id),
+  FOREIGN KEY(workspace_id,current_executor_id) REFERENCES memberships(workspace_id,principal_id),
+  FOREIGN KEY(workspace_id,updated_by_principal_id) REFERENCES memberships(workspace_id,principal_id),
+  FOREIGN KEY(workspace_id,profile_id,work_class)
+    REFERENCES delegation_profiles(workspace_id,id,work_class),
+  CHECK(profile_id IS NOT NULL OR (
+    autonomy_level='human_executes' AND effective_allowed_actions_json='[]'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_responsibility_executor
+  ON task_responsibilities(workspace_id,current_executor_id,status);
+
+-- Immutable audit of assignment, delegation, review, promotion, demotion and override.
+CREATE TABLE IF NOT EXISTS responsibility_events (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  event_type TEXT NOT NULL CHECK(event_type IN (
+    'assigned','delegated','promotion_proposed','promoted','demoted',
+    'human_takeover','agent_resumed','reviewed','override','revoked','escalated')),
+  from_actor_id TEXT,
+  to_actor_id TEXT,
+  from_autonomy_level TEXT CHECK(from_autonomy_level IS NULL OR from_autonomy_level IN (
+    'human_executes','agent_prepares','agent_supervised','agent_bounded','agent_exception_only')),
+  to_autonomy_level TEXT CHECK(to_autonomy_level IS NULL OR to_autonomy_level IN (
+    'human_executes','agent_prepares','agent_supervised','agent_bounded','agent_exception_only')),
+  profile_id TEXT,
+  profile_version INTEGER,
+  actor_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '{}'
+    CHECK(json_valid(evidence_json) AND json_type(evidence_json)='object'),
+  source_ref TEXT,
+  occurred_at TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  UNIQUE(workspace_id,id),
+  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id),
+  FOREIGN KEY(workspace_id,from_actor_id) REFERENCES memberships(workspace_id,principal_id),
+  FOREIGN KEY(workspace_id,to_actor_id) REFERENCES memberships(workspace_id,principal_id),
+  FOREIGN KEY(workspace_id,actor_id) REFERENCES memberships(workspace_id,principal_id),
+  FOREIGN KEY(workspace_id,profile_id) REFERENCES delegation_profiles(workspace_id,id)
+);
+CREATE INDEX IF NOT EXISTS idx_responsibility_events_task
+  ON responsibility_events(workspace_id,task_id,recorded_at);
+CREATE TRIGGER IF NOT EXISTS trg_responsibility_events_no_update
+  BEFORE UPDATE ON responsibility_events
+  BEGIN SELECT RAISE(ABORT,'responsibility_events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_responsibility_events_no_delete
+  BEFORE DELETE ON responsibility_events
+  BEGIN SELECT RAISE(ABORT,'responsibility_events are append-only'); END;
+
+-- Human work is a first-class loop participant, not only a tool-approval gate.
+-- Host-deferred tool approvals remain in approval_requests as a distinct object.
+CREATE TABLE IF NOT EXISTS human_action_requests (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  task_id TEXT,
+  requested_by_principal_id TEXT NOT NULL,
+  assignee_principal_id TEXT NOT NULL,
+  request_kind TEXT NOT NULL CHECK(request_kind IN ('input','decision','review','execution','exception')),
+  title TEXT NOT NULL,
+  request_json TEXT NOT NULL DEFAULT '{}'
+    CHECK(json_valid(request_json) AND json_type(request_json)='object'),
+  due_at TEXT,
+  urgency TEXT NOT NULL DEFAULT 'batch' CHECK(urgency IN ('batch','notify','interrupt')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+    'pending','in_progress','completed','declined','expired','cancelled')),
+  response_json TEXT CHECK(response_json IS NULL OR (
+    json_valid(response_json) AND json_type(response_json)='object')),
+  response_source_ref TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  responded_at TEXT,
+  UNIQUE(workspace_id,id),
+  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id),
+  FOREIGN KEY(workspace_id,requested_by_principal_id)
+    REFERENCES memberships(workspace_id,principal_id),
+  FOREIGN KEY(workspace_id,assignee_principal_id)
+    REFERENCES memberships(workspace_id,principal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_human_action_inbox
+  ON human_action_requests(workspace_id,assignee_principal_id,status,due_at);

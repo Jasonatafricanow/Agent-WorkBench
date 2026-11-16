@@ -35,7 +35,8 @@ class SchemaTests(unittest.TestCase):
             "principals", "external_identities", "workspaces", "memberships",
             "projects", "tasks", "task_events", "task_focus", "dependencies",
             "reminders", "inbox_messages", "message_links", "command_receipts",
-            "memory_outbox", "delivery_outbox",
+            "memory_outbox", "delivery_outbox", "delegation_profiles",
+            "task_responsibilities", "responsibility_events", "human_action_requests",
         } <= names)
 
     def test_task_cannot_reference_foreign_workspace_project(self):
