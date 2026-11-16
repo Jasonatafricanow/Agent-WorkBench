@@ -19,7 +19,7 @@
 
 时间全部存 UTC ISO-8601（含 UTC 标识），显示时按 Principal 的 IANA 时区。官方截止、软截止、计划启动、下次跟进、发生时间是独立字段。日粒度截止明确本地日与截止时间；缺少时区/时间时，不默认为当地午夜，不编造官方期限。
 
-| DelegationProfile | workspace、work_class、version、max_autonomy_level、action allowlist、approval conditions、evidence/promotion policy | 每类工作经 owner 批准的自主权上限 |
+| DelegationProfile | workspace、work_class、version、max_autonomy_level、action/reversible/review allowlist、approval conditions、evidence/promotion policy | 每类工作经 owner 批准的自主权上限 |
 | TaskResponsibility | current_executor、profile/version、autonomy_level、有效动作范围、success/evidence/escalation | 每个任务由谁推进，以及 Agent 可做到什么程度 |
 | ResponsibilityEvent | from/to actor、from/to level、event、reason、evidence、source_ref | 委派、升级、降级、人工接管和撤权的审计历史 |
 | HumanActionRequest | assignee、input/decision/review/execution、due、urgency、response | 人类作为循环中的执行者/决策者，而不只是工具审批人 |
@@ -92,7 +92,7 @@ WAITING 与 BLOCKED 有差别：等待反馈本身是一项可追踪的承诺，
 
 `tasks.assignee_id` 是业务结果的 accountable owner；`task_responsibilities.current_executor_id` 是当前下一步执行者。两者不能合并：人可以仍对结果负责，而 Agent 已获授权执行日常步骤。
 
-工作类别（例如 data retrieval、document drafting、routine follow-up、external communication、financial action、legal submission）由 workspace 的版本化 DelegationProfile 管理。每个 profile 定义最高等级、允许动作、可逆动作、强制审批条件、成功标准、证据要求、升级策略和 promotion gate。TaskResponsibility 可以进一步缩小 profile 的范围，不允许扩大。策略更新创建新版本，旧事件保留原 policy version。
+工作类别（例如 data retrieval、document drafting、routine follow-up、external communication、financial action、legal submission）由 workspace 的版本化 DelegationProfile 管理。每个 profile 定义最高等级、允许动作、可逆动作、强制事后审查动作、强制事前审批条件、成功标准、证据要求、升级策略和 promotion gate。TaskResponsibility 可以进一步缩小 profile 的范围，不允许扩大。策略更新创建新版本，旧事件保留原 policy version。
 
 | Level | 语义 | 人的参与 |
 |---|---|---|
