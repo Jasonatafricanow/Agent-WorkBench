@@ -1,5 +1,7 @@
 # Agent WorkBench — 独立的多 Agent 工作台
 
+**首先阅读：[总体蓝图、设计推导与整体框架](docs/PROJECT_BLUEPRINT.md)**（为什么这样分工、数据流、状态机、模块依赖、故障与分阶段实施）。对应的跨仓边界见 [协作协议矩阵](docs/CROSS_REPO_INTERFACE_MATRIX.md)。
+
 **GitHub 开发状态：正式架构与模块接口已建立；生产接线未完成。**
 
 工作台独立于 MR-Mem：SQL 记录项目、任务、执行历史、延期原因、等待对象与提醒；MR-Mem 提供经宿主授权的用户语义上下文，不能替代 SQL 当前任务状态。Telegram 接收需求和进度，Agent 通过固定工具门面操作，Dashboard 只读。
@@ -38,4 +40,7 @@ python -m unittest discover -s tests -v
 ## 冻结边界
 
 不要把任务数据库、Bot Token、原始会话记录、调度机制或业务状态机写入 MR-Mem 内核。语义来源经当前的 SourceRef 与宿主认可的 Semantic Admission 进入记忆；原始任务状态始终来自 WorkBench SQL。
-\n## Always-on architecture update (2026-11-16)\n\nThe independent WorkBench now includes a **business wake-event ledger** and a typed Agent Host handoff contract. This is not a new always-running Agent service. **Agent Host** retains Sessions/Runs/deferred tool calls; **Mind Runtime** retains cognition/wake intent; **MR-Mem** retains semantic memory. See [ADR-0002](docs/ADR-0002-ALWAYS-ON-OWNERSHIP.md) and [Host protocol](docs/HOST_RUN_PROTOCOL.md). The new code remains an integration foundation; Host/Telegram live wiring is not finished.\n
+
+## Always-on architecture update (2026-11-16)
+
+The independent WorkBench now includes a **business wake-event ledger** and a typed Agent Host handoff contract. This is not a new always-running Agent service. **Agent Host** retains Sessions/Runs/deferred tool calls; **Mind Runtime** retains cognition/wake intent; **MR-Mem** retains semantic memory. See [ADR-0002](docs/ADR-0002-ALWAYS-ON-OWNERSHIP.md) and [Host protocol](docs/HOST_RUN_PROTOCOL.md). The new code remains an integration foundation; Host/Telegram live wiring is not finished.

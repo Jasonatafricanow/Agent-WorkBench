@@ -1,5 +1,7 @@
 # Agent WorkBench — module boundaries
 
+> Architecture rationale & full system topology: [PROJECT_BLUEPRINT.md](PROJECT_BLUEPRINT.md). Cross-repo ownership matrix: [CROSS_REPO_INTERFACE_MATRIX.md](CROSS_REPO_INTERFACE_MATRIX.md).
+
 The authoritative current state and event log live in WorkBench SQL, not MR-Mem.
 The host owns Telegram raw messages, delivery receipts, and their revisions;
 MR-Mem receives only accepted, scope-bound semantic projections via SourceRef.
@@ -28,4 +30,9 @@ workspace and permission for each operation. Distinguish current task state
 Priority of work: SQL event ledger and ACL; native agent tool service; Telegram
 intake; MR-Mem host binding; persistent scheduler/outbox; read-only dashboard;
 container deployment and recovery. End-to-end tests gate live rollout.
-\n## Always-on ownership (2026-11-16)\n\nSee [ADR-0002](ADR-0002-ALWAYS-ON-OWNERSHIP.md) and [HOST_RUN_PROTOCOL.md](HOST_RUN_PROTOCOL.md). WorkBench owns durable **business** inbox/timers/outbox; **the existing Agent Host** owns Run, Session and deferred-tool execution. **Mind Runtime** owns cognition and cognitive wake semantics only; MR-Mem owns semantic memory. A task waiting on a person does not imply the Agent Host has a suspended tool call. No duplicate Agent Loop will be implemented here.\n\nThe new internal `runtime_bridge.WakeEventStore` persists normalized wake events with deduplication and lease/unknown handling. Its Host port is a Protocol, **not** a working Host connection.\n
+
+## Always-on ownership (2026-11-16)
+
+See [ADR-0002](ADR-0002-ALWAYS-ON-OWNERSHIP.md) and [HOST_RUN_PROTOCOL.md](HOST_RUN_PROTOCOL.md). WorkBench owns durable **business** inbox/timers/outbox; **the existing Agent Host** owns Run, Session and deferred-tool execution. **Mind Runtime** owns cognition and cognitive wake semantics only; MR-Mem owns semantic memory. A task waiting on a person does not imply the Agent Host has a suspended tool call. No duplicate Agent Loop will be implemented here.
+
+The new internal `runtime_bridge.WakeEventStore` persists normalized wake events with deduplication and lease/unknown handling. Its Host port is a Protocol, **not** a working Host connection.
