@@ -64,7 +64,7 @@ TaskService, Telegram, Host dispatch, or production autonomy is wired.
    time-sensitive work; interrupt only for explicitly configured critical
    conditions. Human absence must not block independent authorized work.
 9. **Add integration tests**: offline human, task class-specific profiles,
-   action allowlist, profile ceiling, approval conditions, revoked profile,
+   action allowlist, profile ceiling, mandatory review/approval conditions, revoked profile,
    auto-promotion opt-in, demotion, multi-Agent concurrency, Host restart and
    deferred-call resume.
 
