@@ -214,7 +214,7 @@ source accepted → wake.pending → wake.leased → completed / deferred / fail
 
 1. **Accountability**：现有 `tasks.assignee_id` 是对结果负责的业务责任人。
 2. **Current executor**：`task_responsibilities.current_executor_id` 是下一步实际执行者，可以是人或 Agent。
-3. **Delegation envelope**：工作类别、当前等级、动作 allowlist、可逆动作、必须审批条件、成功标准、证据要求、升级策略及 profile 版本。
+3. **Delegation envelope**：工作类别、当前等级、动作 allowlist、可逆动作、强制事后审查动作、必须事前审批条件、成功标准、证据要求、升级策略及 profile 版本。
 4. **Responsibility history**：`responsibility_events` 记录委派、接管、升级、降级、覆盖和撤权的原因及证据。
 
 五个等级：0 人执行；1 Agent 准备、人执行/提交；2 Agent 执行可逆内部步骤、人审查关键提交；3 Agent 在任务级白名单内自主执行；4 Agent 在工作类别批准范围内处理常规事项，人只处理例外。等级 4 仍受动作白名单、审批条件、Host Tool Policy 和人工撤权约束。
