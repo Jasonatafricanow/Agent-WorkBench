@@ -39,6 +39,7 @@ class DelegationEnvelope:
     profile_max_level: AutonomyLevel
     profile_allowed_actions: frozenset[str]
     profile_reversible_actions: frozenset[str]
+    profile_review_actions: frozenset[str]
     profile_approval_conditions: frozenset[str]
     allowed_actions: frozenset[str]
     reversible_actions: frozenset[str]
@@ -57,6 +58,8 @@ class DelegationEnvelope:
             raise ValueError("task cannot broaden the profile's reversible-action set")
         if not self.reversible_actions.issubset(self.allowed_actions):
             raise ValueError("reversible actions must be within the task allowlist")
+        if not self.profile_review_actions.issubset(self.review_actions):
+            raise ValueError("task cannot remove mandatory work-class review actions")
         if not self.profile_approval_conditions.issubset(self.approval_conditions):
             raise ValueError("task cannot remove mandatory work-class approval conditions")
         if not self.review_actions.issubset(self.allowed_actions):
@@ -65,7 +68,7 @@ class DelegationEnvelope:
             raise ValueError("policy_version must be positive")
         identifiers = (
             self.profile_allowed_actions | self.profile_reversible_actions
-            | self.profile_approval_conditions | self.allowed_actions
+            | self.profile_review_actions | self.profile_approval_conditions | self.allowed_actions
             | self.approval_conditions | self.review_actions
         )
         if any(not item.strip() for item in identifiers):
