@@ -317,6 +317,7 @@ CREATE TABLE IF NOT EXISTS delegation_profiles (
   updated_at TEXT NOT NULL,
   UNIQUE(workspace_id,id),
   UNIQUE(workspace_id,id,work_class),
+  UNIQUE(workspace_id,id,version),
   UNIQUE(workspace_id,work_class,version),
   FOREIGN KEY(workspace_id,created_by_principal_id)
     REFERENCES memberships(workspace_id,principal_id),
@@ -359,6 +360,8 @@ CREATE TABLE IF NOT EXISTS task_responsibilities (
   FOREIGN KEY(workspace_id,updated_by_principal_id) REFERENCES memberships(workspace_id,principal_id),
   FOREIGN KEY(workspace_id,profile_id,work_class)
     REFERENCES delegation_profiles(workspace_id,id,work_class),
+  FOREIGN KEY(workspace_id,profile_id,profile_version)
+    REFERENCES delegation_profiles(workspace_id,id,version),
   CHECK(profile_id IS NOT NULL OR (
     autonomy_level='human_executes' AND effective_allowed_actions_json='[]'))
 );
@@ -393,7 +396,11 @@ CREATE TABLE IF NOT EXISTS responsibility_events (
   FOREIGN KEY(workspace_id,from_actor_id) REFERENCES memberships(workspace_id,principal_id),
   FOREIGN KEY(workspace_id,to_actor_id) REFERENCES memberships(workspace_id,principal_id),
   FOREIGN KEY(workspace_id,actor_id) REFERENCES memberships(workspace_id,principal_id),
-  FOREIGN KEY(workspace_id,profile_id) REFERENCES delegation_profiles(workspace_id,id)
+  FOREIGN KEY(workspace_id,profile_id) REFERENCES delegation_profiles(workspace_id,id),
+  FOREIGN KEY(workspace_id,profile_id,profile_version)
+    REFERENCES delegation_profiles(workspace_id,id,version),
+  CHECK((profile_id IS NULL AND profile_version IS NULL) OR
+        (profile_id IS NOT NULL AND profile_version IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_responsibility_events_task
   ON responsibility_events(workspace_id,task_id,recorded_at);
