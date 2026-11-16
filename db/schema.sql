@@ -222,3 +222,53 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox_messages(workspace_id,status,received_at);
+
+-- Business wake-event inbox. Agent Host owns the Run/Session referenced here.
+-- A source-specific id permits idempotent ingestion; an expired lease becomes
+-- unknown and requires Host reconciliation, not blind replay of side effects.
+CREATE TABLE IF NOT EXISTS wake_events (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  task_id TEXT,
+  origin TEXT NOT NULL,
+  origin_event_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN (
+    'user_message','timer_fired','external_change',
+    'approval_decided','agent_handoff')),
+  source_ref TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+    'pending','leased','completed','deferred','failed','unknown')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  lease_until TEXT,
+  host_run_ref TEXT,
+  host_session_ref TEXT,
+  deferred_ref TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(workspace_id,origin,origin_event_id),
+  UNIQUE(workspace_id,id),
+  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id)
+);
+CREATE INDEX IF NOT EXISTS idx_wake_claim
+  ON wake_events(workspace_id,status,created_at);
+
+-- WorkBench stores approval decisions, never tool-call state. The Agent Host
+-- persists the actual suspended call and rechecks tool permission on resume.
+CREATE TABLE IF NOT EXISTS approval_requests (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  wake_event_id TEXT NOT NULL,
+  task_id TEXT,
+  requested_by TEXT NOT NULL REFERENCES principals(id),
+  approver_id TEXT NOT NULL REFERENCES principals(id),
+  request_summary TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+    'pending','approved','denied','expired','cancelled')),
+  host_deferred_ref TEXT NOT NULL,
+  decision_source_ref TEXT,
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  UNIQUE(workspace_id,id),
+  FOREIGN KEY(workspace_id,wake_event_id) REFERENCES wake_events(workspace_id,id),
+  FOREIGN KEY(workspace_id,task_id) REFERENCES tasks(workspace_id,id)
+);
