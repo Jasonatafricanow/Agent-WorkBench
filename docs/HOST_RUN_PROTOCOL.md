@@ -101,3 +101,22 @@ side effects.
 5. Verify per-tool auth revocation after approval was issued.
 6. Test event batching/single active Run policy per user where the Host supports it.
 7. Only after those gates, add the service worker and enable real notifications.
+
+## Owner decision (2026-11-17): a separate work bot on Pi, gaps filled in the Host layer
+
+External collaborators (e.g. Gao) talk to a **dedicated work bot** running as its
+own Pi process, with only WorkBench tools and work-scoped memory. The personal
+companion bot is never reused as this Host.
+
+Pi (verified on the deployed 1.5.2 runtime) has no built-in event-id lookup or
+in-place deferred tool call. These are filled in the work bot's Host layer (Pi
+extension + gateway), not in Pi core, WorkBench or Mind Runtime:
+
+| Need | Pi primitive | Host-layer fill |
+|---|---|---|
+| Session checkpoint / resume | sessions are JSONL; `SessionManager.open(path)` | use as is |
+| Idempotent submit by `wake_event_id`, lookup by event | `pi.appendEntry()` (custom entries outside LLM context) | gateway ledger `event_id → session file, status, outcome`; checked before every dispatch; the event id is also appended into the session. Not found after timeout → `unknown`, human reconcile |
+| Deferred tool call | `tool_call` hook can block (`block`, `reason`, `terminate`) and read input | hook calls `SqliteTaskService.evaluate_action`; when approval is required it blocks, stores tool name + input fingerprint in `approval_requests`, terminates the run. On `approval_decided` the same session is reopened, the model re-issues the call, and the hook only lets through a call whose fingerprint matches the approved one |
+| Auto-mode style guard | same hook | action allowlist from the task's delegation envelope; a classifier can be added later |
+| One lane per person, batching | gateway already serialises replies per chat | add a merge window |
+| Credentials outside the Agent | tool set is configurable | no generic bash on the work bot; credentials injected only inside specific tools |

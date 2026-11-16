@@ -96,3 +96,16 @@ promote or persist WorkBench execution authority. Delegation profiles,
 task-level action envelopes, human approvals and revocation are owned by
 WorkBench SQL; the Agent Host separately checks its tool policy at execution
 and resume time. Memory retrieval is context, never a capability.
+
+## Owner decision (2026-11-17): memory is written by the handling Agent at wrap-up
+
+The Agent that handled the turn already understood it. As the last step of the
+turn it writes the memory itself through MR-Mem `write` (like a session handoff
+note), with the source pointing at the task_event or original message. There is
+**no separate online KEEP/DEFER/DROP pass** over task events ("what was already
+reasoned is not reasoned again"). `memory_outbox` is only a pointer queue: the
+Host enqueues a pointer when MR-Mem is unavailable so the write can be retried,
+or for later offline curation. `WorkbenchEventSourceReader` stays inside MR-Mem
+for permission-checked source lookup; Agents get MR-Mem `write` and `search`
+only, never a separate read tool. `SqliteTaskService` therefore does not write
+`memory_outbox` rows itself.

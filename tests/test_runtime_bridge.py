@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from workdesk.runtime_bridge import (
@@ -93,14 +94,14 @@ class WakeEventTests(unittest.TestCase):
             outcome=HostOutcome("deferred", "run-1", "session-1", "deferred-1"),
             now=NOW,
         )
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             actual = conn.execute(
                 "SELECT status,host_session_ref,deferred_ref FROM wake_events"
             ).fetchone()
         self.assertEqual(actual, ("deferred", "session-1", "deferred-1"))
 
     def test_cross_workspace_task_link_is_rejected_by_sql(self):
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute(
                 """INSERT INTO tasks(id,workspace_id,title,created_at,updated_at)

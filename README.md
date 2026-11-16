@@ -30,6 +30,19 @@
 - `docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SQL_MIGRATION_POLICY.md`：施工与验收
 - `.github/workflows/quality.yml`：离线测试
 
+## 已实现：SQL TaskService（2026-11-17）
+
+- `src/workdesk/task_service.py`：`SqliteTaskService` 实现 `TaskService` 协议（`overview / read / apply`），并提供 Host 侧的 `evaluate_action`（按任务委托范围路由业务动作，不是工具授权）。
+- 一次 `apply` 全有或全无：任务快照、`task_events`、委托记录与 `responsibility_events`、`human_action_requests`、提醒、wake event、`command_receipts` 同一个 `BEGIN IMMEDIATE` 事务。
+- 幂等（同 key 同 payload 返回原回执；不同 payload 或不同主体报冲突）、`expected_version` 乐观锁、批内 `ref` 引用（如先建任务再挂提醒）。
+- 权限每次从 `memberships` 重读；requester 只看到自己提的任务（精简视图），看不到的任务与不存在的任务返回同一个 `NOT_FOUND`；requester 只能提需求、写备注、请 owner 处理。
+- 证据规则：DONE/CANCELLED/重开、改已有官方截止日需 `explicit_user`/`verified_tool` + source_ref + reason；截止日推后需 `delay_kind` + reason；WAITING 必须有未解除的依赖；依赖解除自动取消对应的催促提醒。
+- 委托：只有人类 owner 能改执行人和自主级别，只能收窄已批准的工作类别策略；暂停/撤权立即生效；人回复 Human Action 后在同一事务生成 `human_action_completed` wake event，回到工作循环。
+- `src/workdesk/profiles.py`：`DelegationProfileAdmin`，owner 专用的策略发布入口，**不经过 Agent 工具门面**。
+- 测试：`tests/test_task_service.py`（真实 SQLite 文件，含双写并发、批量回滚、重启、越权、委托上限、人回复回环）。
+
+尚未实现：版本化迁移与日期粒度（WB-02）、承诺/交付物/工作书签实体、timer worker、Host 派发与 unknown 对账、delivery outbox 发送端、Telegram 入口、只读看板、NAS 部署。
+
 ## 下一步的真实工程工作
 
 将已形成的领域内核参考实现逐模块迁入本仓库，重点是 SQL 事务状态机、task_events、幂等与版本冲突、requester 作用域、dependency/reminder、outbox。随后接入已认证 Telegram Bot、MR-Mem Host Adapter、调度守护进程与只读 Dashboard，再做 NAS 部署。**上述事项未接通前不能声称交付完整生产系统。**
