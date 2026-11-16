@@ -38,6 +38,9 @@ class TaskService(Protocol):
         self, *, actor: ActorContext, idempotency_key: str,
         operations: list[dict[str, Any]],
     ) -> list[dict[str, Any]]: ...
+    def changes_since(
+        self, *, actor: ActorContext, view: str, limit: int = 200, mark_seen: bool = False,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,10 @@ class WorkbenchTools:
         if not isinstance(task_id, str) or not task_id.strip():
             raise ValueError("task_id is required")
         return self.tasks.read(actor=self.actor, task_id=task_id)
+
+    def whats_new(self, *, view: str = "agent", mark_seen: bool = True) -> dict[str, Any]:
+        """Changes since this actor last looked in this view (empty = nothing new)."""
+        return self.tasks.changes_since(actor=self.actor, view=view, mark_seen=mark_seen)
 
     def change_tasks(
         self, *, idempotency_key: str, operations: list[dict[str, Any]]
