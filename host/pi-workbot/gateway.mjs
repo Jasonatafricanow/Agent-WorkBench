@@ -4,25 +4,19 @@
 //   -> durable WorkBench event -> short Pi Run with WorkBench tools -> facts written back -> sleep.
 // Host-layer fills for Pi (see docs/HOST_RUN_PROTOCOL.md): a local ledger (event id -> session, outcome),
 // the tool_call approval guard (agent/guard-extension.ts), and reopening the same session after approval.
+import './load-env.mjs'; // must stay first: loads WORKBOT_ENV_FILES before other modules read env
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { wb } from './workbench-client.mjs';
 import { createWorkbenchTools, retryMemoryWrites } from './tools.mjs';
 import { setTurn, clearTurn } from './turn-context.mjs';
 
-for (const file of (process.env.WORKBOT_ENV_FILES || '').split(',').filter(Boolean)) {
-  if (!fs.existsSync(file)) continue;
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const m = line.match(/^([A-Z_][A-Z_0-9]*)=(.*)$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^(['"])(.*)\1$/, '$2');
-  }
-}
-
 const RUNTIME = process.env.PI_RUNTIME || '/opt/xiyue-runtime';
 const require = createRequire(RUNTIME + '/package.json');
 const { createAgentSession, SessionManager, ModelRuntime, DefaultResourceLoader } =
-  await import(RUNTIME + '/node_modules/@earendil-works/pi-coding-agent/dist/index.js');
+  await import(pathToFileURL(path.join(RUNTIME, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js')).href);
 const { Bot } = require('grammy');
 
 const env = process.env;
@@ -39,8 +33,9 @@ const RECIPIENT_CHATS = JSON.parse(env.WORKBOT_RECIPIENT_CHATS || '{}'); // prin
 const OWNER_PRINCIPAL = env.WORKBOT_OWNER_PRINCIPAL || 'owner';
 const POLL_MS = Number(env.WORKBOT_POLL_SECONDS || 20) * 1000;
 const TOOL_NAMES = ['list_tasks', 'get_task', 'change_tasks', 'whats_new', 'work_memory_search', 'work_memory_write',
-  ...Object.keys(JSON.parse(env.WORKBOT_GUARDED_TOOLS || '{}'))];
-if (!env.WORKBOT_TELEGRAM_TOKEN || !env.WORKBENCH_HOST_TOKEN || !env.WORKBENCH_WORKSPACE) {
+  'send_external_message', ...Object.keys(JSON.parse(env.WORKBOT_GUARDED_TOOLS || '{}'))];
+const CLI = env.WORKBOT_TRANSPORT === 'cli';
+if ((!CLI && !env.WORKBOT_TELEGRAM_TOKEN) || !env.WORKBENCH_HOST_TOKEN || !env.WORKBENCH_WORKSPACE) {
   throw Error('WORKBOT_TELEGRAM_TOKEN, WORKBENCH_HOST_TOKEN and WORKBENCH_WORKSPACE are required');
 }
 fs.mkdirSync(WORK_DIR, { recursive: true });
@@ -49,7 +44,8 @@ const runtime = await ModelRuntime.create();
 const [provider, modelId] = (env.WORKBOT_MODEL || 'xai/grok-4.7').split('/');
 const model = runtime.getModel(provider, modelId);
 if (!model) throw Error('model not available in runtime: ' + env.WORKBOT_MODEL);
-const bot = new Bot(env.WORKBOT_TELEGRAM_TOKEN, { client: { timeoutSeconds: 90 } });
+const bot = CLI ? (await import('./cli-transport.mjs')).createCliBot(env)
+  : new Bot(env.WORKBOT_TELEGRAM_TOKEN, { client: { timeoutSeconds: 90 } });
 
 // ------------------------------------------------------------------ ledger
 const ledger = new Map();
@@ -113,8 +109,10 @@ async function runTurn({ chatKey, chatId, identity, wakeEventId, taskId, sourceR
   } finally {
     clearTurn(sessionId);
   }
-  const reply = session.state.messages.slice(start).filter(m => m.role === 'assistant')
-    .flatMap(m => m.content.filter(part => part.type === 'text').map(part => part.text)).join('\n').trim();
+  // Only the final answer goes out: text the model wrote between tool calls is its working narration.
+  const answers = session.state.messages.slice(start).filter(m => m.role === 'assistant')
+    .map(m => m.content.filter(part => part.type === 'text').map(part => part.text).join('\n').trim()).filter(Boolean);
+  const reply = answers.at(-1) || '';
   // Tie the source messages to every task this Run touched, so later edits can be traced to them.
   if (inboxIds.length && turn.touched?.size) {
     const ops = [...turn.touched].flatMap(task => inboxIds.map(inbox => ({ op: 'link_inbox', task_id: task, inbox_id: inbox,
@@ -191,6 +189,7 @@ async function flush(chatKey, { ctx, items }) {
     for (const item of items) {
       if (item.label === '消息') await wb('/v1/intake/finish', { inbox_id: item.intake.inbox_id, ok }).catch(() => {});
     }
+    bot.turnDone?.(chatKey); // CLI transport waits on this instead of on the first outgoing message
   });
 }
 

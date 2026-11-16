@@ -8,13 +8,14 @@
 //                              otherwise an approval request is filed and the run ends (terminate).
 //   out_of_scope / human_execution_required / agent_prepare_only -> blocked with the reason.
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { wb } from '../workbench-client.mjs';
 
 const GUARDED: Record<string, any> = {
   send_external_message: { action: 'send_external_message', task_from: 'task_id', conditions_from: 'new_recipient' },
   ...JSON.parse(process.env.WORKBOT_GUARDED_TOOLS || '{}'),
 };
-const PROMPT_FILE = process.env.WORKBOT_PROMPT_FILE || new URL('./WORKBOT.md', import.meta.url).pathname;
+const PROMPT_FILE = process.env.WORKBOT_PROMPT_FILE || fileURLToPath(new URL('./WORKBOT.md', import.meta.url));
 const APPROVAL_HOURS = Number(process.env.WORKBOT_APPROVAL_HOURS || 24);
 // Delegation is evaluated for the Agent that executes, not for the person who is chatting.
 const AGENT_IDENTITY = { provider: 'host', bot_id: process.env.WORKBOT_BOT_ID || 'workbot',

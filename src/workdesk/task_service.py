@@ -600,7 +600,7 @@ class _Batch:
             assignee = self.member(op.get("assignee_id") or self.owner_id, "assignee_id", ("owner", "editor"))
             state = op.get("state", "INBOX")
             if state not in ("INBOX", "READY", "DOING"):
-                raise InvalidOperation("new tasks start in INBOX, READY or DOING", field="state")
+                raise InvalidOperation("new tasks start in INBOX, READY or DOING", field="state", allowed=list(("INBOX", "READY", "DOING")))
         priority = op.get("priority", 2)
         if type(priority) is not int or not 0 <= priority <= 4:
             raise InvalidOperation("priority must be 0..4", field="priority")
@@ -717,6 +717,8 @@ class _Batch:
                 continue
             left -= 1
         local = f"{day.isoformat()}T{rule.get('at', '18:00')}"
+        if _local_to_utc(local, tz_name) <= self.now:
+            return None  # the rule's slot already passed; suggesting it would only be noise
         return {"soft_due_at": _local_to_utc(local, tz_name), "local": local,
                 "basis": f"官方截止前 {rule.get('days_before', 3)} 个{'工作日' if rule.get('skip_weekends', True) else '天'}"}
 
@@ -761,7 +763,7 @@ class _Batch:
         task = self.task(dict(op, task_id=row["task_id"]))
         status = op.get("status")
         if status not in ("kept", "broken", "rescheduled", "withdrawn"):
-            raise InvalidOperation("status must be kept, broken, rescheduled or withdrawn", field="status")
+            raise InvalidOperation("status must be kept, broken, rescheduled or withdrawn", field="status", allowed=list(("kept", "broken", "rescheduled", "withdrawn")))
         if row["status"] != "open":
             raise InvalidOperation(f"commitment is already {row['status']}")
         if evidence == "inferred" or not op.get("source_ref"):
@@ -962,7 +964,7 @@ class _Batch:
             raise NotFound("project not found")
         state = op.get("state", row["state"])
         if state not in ("active", "paused", "done", "cancelled"):
-            raise InvalidOperation("state must be active, paused, done or cancelled", field="state")
+            raise InvalidOperation("state must be active, paused, done or cancelled", field="state", allowed=list(("active", "paused", "done", "cancelled")))
         self.c.execute("UPDATE projects SET title=?, goal=?, state=?, updated_at=? WHERE id=?",
                        (_text(op.get("title"), "title") or row["title"],
                         _text(op.get("goal"), "goal") if op.get("goal") is not None else row["goal"],
@@ -1054,7 +1056,7 @@ class _Batch:
         self.owner_only("set NOW/NEXT focus", op)
         slot = op.get("slot")
         if slot not in ("NOW", "NEXT1", "NEXT2"):
-            raise InvalidOperation("slot must be NOW, NEXT1 or NEXT2", field="slot")
+            raise InvalidOperation("slot must be NOW, NEXT1 or NEXT2", field="slot", allowed=list(("NOW", "NEXT1", "NEXT2")))
         previous = self.c.execute("SELECT task_id FROM task_focus WHERE workspace_id=? AND slot=?",
                                   (self.ws, slot)).fetchone()
         target = None
@@ -1082,7 +1084,7 @@ class _Batch:
         task = self.task(op)
         kind = op.get("kind")
         if kind not in ("external_response", "prerequisite_task", "artifact", "permission", "other"):
-            raise InvalidOperation("unsupported dependency kind", field="kind")
+            raise InvalidOperation("unsupported dependency kind", field="kind", allowed=list(("external_response", "prerequisite_task", "artifact", "permission", "other")))
         responsible = op.get("responsible_principal_id")
         if responsible is not None and self.c.execute(
                 "SELECT 1 FROM principals WHERE id=?", (responsible,)).fetchone() is None:
@@ -1113,7 +1115,7 @@ class _Batch:
             raise InvalidOperation("dependency is not open")
         status = op.get("resolution", "resolved")
         if status not in ("resolved", "cancelled"):
-            raise InvalidOperation("resolution must be resolved or cancelled", field="resolution")
+            raise InvalidOperation("resolution must be resolved or cancelled", field="resolution", allowed=list(("resolved", "cancelled")))
         if status == "resolved" and (evidence == "inferred" or not op.get("source_ref")):
             raise EvidenceRequired("resolving a dependency needs a non-inferred source_ref")
         self.c.execute("UPDATE dependencies SET status=?, resolved_source_ref=?, resolved_at=? WHERE id=?",
@@ -1212,7 +1214,7 @@ class _Batch:
             assignee = op.get("assignee_principal_id") or self.owner_id
         kind = op.get("request_kind")
         if kind not in ("input", "decision", "review", "execution", "exception"):
-            raise InvalidOperation("unsupported request_kind", field="request_kind")
+            raise InvalidOperation("unsupported request_kind", field="request_kind", allowed=list(("input", "decision", "review", "execution", "exception")))
         urgency = self.urgency(op)
         request_id = self.s._new_id("hum")
         try:
@@ -1234,7 +1236,7 @@ class _Batch:
     def urgency(self, op: dict) -> str:
         urgency = op.get("urgency", "batch")
         if urgency not in ("batch", "notify", "interrupt"):
-            raise InvalidOperation("urgency must be batch, notify or interrupt", field="urgency")
+            raise InvalidOperation("urgency must be batch, notify or interrupt", field="urgency", allowed=list(("batch", "notify", "interrupt")))
         # An outside requester's messages never interrupt the owner; they wait for the digest.
         return "batch" if self.role == "requester" else urgency
 
@@ -1258,7 +1260,7 @@ class _Batch:
             raise InvalidOperation(f"request is already {req['status']}")
         status = op.get("status", "completed")
         if status not in ("completed", "declined"):
-            raise InvalidOperation("status must be completed or declined", field="status")
+            raise InvalidOperation("status must be completed or declined", field="status", allowed=list(("completed", "declined")))
         if evidence not in STRONG_EVIDENCE or not op.get("source_ref"):
             raise EvidenceRequired("a human response needs explicit evidence and the source message ref")
         self.cites_message(op, "answering a human request", sender=self.actor.principal_id)
@@ -1351,7 +1353,7 @@ class _Batch:
         task = self.task(op)
         status = op.get("status")
         if status not in ("active", "paused", "revoked"):
-            raise InvalidOperation("status must be active, paused or revoked", field="status")
+            raise InvalidOperation("status must be active, paused or revoked", field="status", allowed=list(("active", "paused", "revoked")))
         old = self.c.execute("SELECT * FROM task_responsibilities WHERE workspace_id=? AND task_id=?",
                              (self.ws, task["id"])).fetchone()
         if old is None:
