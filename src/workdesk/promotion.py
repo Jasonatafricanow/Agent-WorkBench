@@ -97,6 +97,21 @@ def review_delegations(database: str | Path, *, now: str) -> list[dict]:
                      r["current_executor_id"], r["current_executor_id"], r["autonomy_level"], level,
                      r["profile_id"], r["profile_version"], r["approved_by_principal_id"],
                      f"auto-promotion pre-authorized in profile v{r['profile_version']}", evidence_json, now, now))
+                conn.execute(
+                    """INSERT INTO task_events(id,workspace_id,task_id,actor_id,kind,after_json,reason,evidence_type,
+                         occurred_at,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (f"evt-{uuid.uuid4().hex}", r["workspace_id"], r["task_id"], r["approved_by_principal_id"],
+                     "responsibility_changed", json.dumps({"autonomy_level": level, "auto_promotion": True,
+                                                           "evidence": json.loads(evidence_json)}),
+                     "auto-promotion pre-authorized by the owner's profile", "system", now, now))
+                conn.execute("UPDATE tasks SET version=version+1, updated_at=? WHERE workspace_id=? AND id=?",
+                             (now, r["workspace_id"], r["task_id"]))
+                conn.execute(
+                    """INSERT OR IGNORE INTO delivery_outbox(id,workspace_id,task_id,recipient_principal_id,channel,payload_json,
+                         dedupe_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (f"dlv-out-{uuid.uuid4().hex}", r["workspace_id"], r["task_id"], r["approved_by_principal_id"], "telegram",
+                     json.dumps({"text": f"已按你预先的授权自动升级：{r['work_class']} {r['autonomy_level']} → {level}"},
+                                ensure_ascii=False), f"promotion:{r['task_id']}:{level}", now, now))
                 out.append({"task_id": r["task_id"], "promoted_to": level})
                 continue
             pending = conn.execute(

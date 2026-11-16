@@ -109,3 +109,9 @@ or for later offline curation. `WorkbenchEventSourceReader` stays inside MR-Mem
 for permission-checked source lookup; Agents get MR-Mem `write` and `search`
 only, never a separate read tool. `SqliteTaskService` therefore does not write
 `memory_outbox` rows itself.
+
+Grants (2026-11-17): reading work memory is authorized for the person in the chat
+(`memory_context_grants`, user `workbench:<workspace>`; requesters have no grant by
+default); the wrap-up write is authorized for the handling Agent. The resolved
+`memory_user_id` is sent to MR-Mem with every call. Writes queued while MR-Mem is down
+are re-authorized at replay, so a revoked grant drops them.

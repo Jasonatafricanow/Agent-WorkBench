@@ -280,6 +280,8 @@ class SqliteTaskService:
                     "state NOT IN ('DONE','CANCELLED') AND ((soft_due_at IS NOT NULL AND soft_due_at<?)"
                     " OR (official_due_at IS NOT NULL AND official_due_at<?))", (now, now),
                     order="COALESCE(official_due_at, soft_due_at), id"),
+                "recently_done": tasks("state='DONE' AND completed_at>=?", (_plus_days(now, -7),),
+                                       order="completed_at DESC, id"),
                 "due_this_week": tasks(
                     "state NOT IN ('DONE','CANCELLED') AND COALESCE(official_due_at, soft_due_at) BETWEEN ? AND ?",
                     (now, _plus_days(now, 7)), order="COALESCE(official_due_at, soft_due_at), id"),
@@ -328,7 +330,8 @@ class SqliteTaskService:
                 (ws, actor.principal_id, view)).fetchone()
             since = mark["last_seen_seq"] if mark else 0
             scope, args = ("", ()) if role in READ_ALL_ROLES else (
-                "AND t.requester_id=? AND (e.actor_id=? OR e.kind IN ('created','state_changed','official_due_set'))",
+                "AND t.requester_id=? AND (e.actor_id=? OR e.kind IN ('created','state_changed','official_due_set')"
+                " OR (e.kind IN ('patched','delayed') AND json_extract(e.after_json,'$.official_due_at') IS NOT NULL))",
                 (actor.principal_id, actor.principal_id))
             rows = conn.execute(
                 f"""SELECT e.rowid AS seq, e.task_id, t.title, e.kind, e.actor_id, e.reason, e.after_json,
@@ -373,6 +376,9 @@ class SqliteTaskService:
             if resp["current_executor_id"] != actor.principal_id:
                 return {"route": "out_of_scope", "reason": "caller is not the current executor of this task"}
             profile = self._profile(conn, actor.workspace_id, resp["profile_id"]) if resp["profile_id"] else None
+            if profile is not None and profile["status"] != "active":
+                return {"route": "human_approval_required",
+                        "reason": "the work-class profile changed; the owner must re-confirm this delegation"}
             envelope = self._envelope(resp, profile)
             route = route_action(envelope, action=action, triggered_conditions=triggered_conditions)
             return {"route": route.value, "executor_id": resp["current_executor_id"],
@@ -520,15 +526,31 @@ class _Batch:
     def owner_only(self, what: str, op: dict | None = None) -> None:
         if self.role != "owner":
             raise Forbidden(f"only the workspace owner may {what}")
-        if op is not None and self.actor.source != "cli":
-            ref = op.get("source_ref")
-            found = ref and self.c.execute(
-                """SELECT 1 FROM inbox_messages i WHERE i.workspace_id=? AND i.sender_principal_id=?
-                   AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r
-                        WHERE r.inbox_id=i.id AND r.raw_source_ref=?))""",
-                (self.ws, self.actor.principal_id, ref, ref)).fetchone()
-            if not found:
-                raise EvidenceRequired(f"{what} must cite a message the owner actually sent (source_ref)")
+        if op is not None:
+            self.cites_message(op, f"{what}", sender=self.actor.principal_id)
+
+    def cites_message(self, op: dict, what: str, *, sender: str | None = None, any_human: bool = False,
+                      ref_field: str = "source_ref") -> str | None:
+        """A human decision made through a chat Host must point at an inbox message that person really
+        sent; otherwise the model could invent "the owner said yes". The trusted CLI is exempt.
+        Returns the sender principal of the cited message."""
+        if self.actor.source == "cli":
+            return sender
+        ref = op.get(ref_field)
+        row = ref and self.c.execute(
+            """SELECT i.sender_principal_id, p.kind FROM inbox_messages i JOIN principals p ON p.id=i.sender_principal_id
+               WHERE i.workspace_id=? AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r
+                    WHERE r.inbox_id=i.id AND r.raw_source_ref=?))""", (self.ws, ref, ref)).fetchone()
+        ok = row is not None and ((sender is not None and row["sender_principal_id"] == sender)
+                                  or (any_human and row["kind"] == "human"))
+        if not ok:
+            raise EvidenceRequired(f"{what} must cite a message that person actually sent ({ref_field})")
+        return row["sender_principal_id"]
+
+    def role_of(self, principal_id: str) -> str | None:
+        row = self.c.execute("SELECT role FROM memberships WHERE workspace_id=? AND principal_id=? AND active=1",
+                             (self.ws, principal_id)).fetchone()
+        return row["role"] if row else None
 
     def project(self, project_id: Any) -> str | None:
         if project_id is None:
@@ -537,13 +559,15 @@ class _Batch:
             raise InvalidOperation("project_id is not a project of this workspace", field="project_id")
         return project_id
 
-    def member(self, principal_id: Any, field: str) -> str:
+    def member(self, principal_id: Any, field: str, roles: tuple[str, ...] | None = None) -> str:
         row = self.c.execute(
-            """SELECT 1 FROM memberships m JOIN principals p ON p.id=m.principal_id
+            """SELECT m.role FROM memberships m JOIN principals p ON p.id=m.principal_id
                WHERE m.workspace_id=? AND m.principal_id=? AND m.active=1 AND p.active=1""",
             (self.ws, principal_id)).fetchone()
         if row is None:
             raise InvalidOperation(f"{field} is not an active workspace member", field=field)
+        if roles is not None and row["role"] not in roles:
+            raise InvalidOperation(f"{field} must be one of the workspace's own people ({', '.join(roles)})", field=field)
         return principal_id
 
     def finish(self, results: list[dict]) -> None:
@@ -573,7 +597,7 @@ class _Batch:
             requester = op.get("requester_id")
             if requester is not None:
                 self.member(requester, "requester_id")
-            assignee = self.member(op.get("assignee_id") or self.owner_id, "assignee_id")
+            assignee = self.member(op.get("assignee_id") or self.owner_id, "assignee_id", ("owner", "editor"))
             state = op.get("state", "INBOX")
             if state not in ("INBOX", "READY", "DOING"):
                 raise InvalidOperation("new tasks start in INBOX, READY or DOING", field="state")
@@ -614,7 +638,7 @@ class _Batch:
                 if type(value) is not int or not 0 <= value <= 4:
                     raise InvalidOperation("priority must be 0..4", field="priority")
             elif key == "assignee_id":
-                value = self.member(value, "assignee_id")
+                value = self.member(value, "assignee_id", ("owner", "editor"))
             elif key == "project_id":
                 value = self.project(value or None)
             else:
@@ -792,12 +816,18 @@ class _Batch:
         if status == "SUBMITTED":
             if evidence != "verified_tool" or not op.get("receipt_ref"):
                 raise EvidenceRequired("SUBMITTED needs a verified delivery receipt (receipt_ref)")
+            if self.actor.source != "cli" and not self.c.execute(
+                    """SELECT 1 FROM delivery_outbox WHERE workspace_id=? AND id=? AND status='sent'
+                       AND provider_message_id IS NOT NULL""", (self.ws, op["receipt_ref"])).fetchone():
+                raise EvidenceRequired("receipt_ref must be a delivery the carrier confirmed as sent")
             sets.update(submit_receipt_ref=op["receipt_ref"], submitted_at=self.now,
                         revision=row["revision"] + (1 if row["status"] in ("REVIEW_REQUIRED", "REJECTED") else 0),
                         artifact_ref=op.get("artifact_ref") or row["artifact_ref"])
         else:
             if evidence not in STRONG_EVIDENCE or not op.get("source_ref"):
                 raise EvidenceRequired(f"{status} needs the recipient's own message as source_ref")
+            # Outcomes count as promotion evidence, so they must come from a real person's message.
+            self.cites_message(op, f"marking a deliverable {status}", any_human=True)
             if status == "ACKNOWLEDGED":
                 sets["acknowledged_at"] = self.now
             if status in ("ACCEPTED", "REJECTED", "REVIEW_REQUIRED"):
@@ -844,6 +874,12 @@ class _Batch:
         until_at = local_to_utc(op["until_local"], tz_name) if op.get("until_local") else None
         schedule_id = self.s._new_id("sch")
         template = _obj(op.get("template"), "template")
+        if template.get("delegate"):
+            self.owner_only("attach a delegation to a recurring schedule", op)
+            spec = _obj(template["delegate"], "template.delegate")
+            if spec.get("autonomy_level") not in LEVELS:
+                raise InvalidOperation("template.delegate.autonomy_level is required", allowed=list(LEVELS))
+            self.member(spec.get("executor_id"), "template.delegate.executor_id")
         self.c.execute(
             """INSERT INTO schedule_rules(id,workspace_id,title,template_json,timezone,frequency,interval_n,
                  local_time,next_fire_local,next_fire_at,max_occurrences,until_at,created_by_principal_id,
@@ -903,7 +939,9 @@ class _Batch:
              _dumps({"kind": "proposed_change", "fields": fields,
                      "current": {k: task[k] for k in fields if k in task.keys()},
                      "reason": _text(op.get("reason"), "reason"), "source_ref": op.get("source_ref")}),
-             op.get("urgency", "batch"), self.now, self.now))
+             self.urgency(op), self.now, self.now))
+        self.announce(task["id"], self.owner_id, self.urgency(op), _text(op.get("title"), "title")
+                      or f"确认修改：{task['title']}", request_id)
         return {"task_id": task["id"], "human_action_id": request_id,
                 "event_id": self.event(task["id"], "change_proposed", op, evidence,
                                        after={"human_action_id": request_id, "fields": fields})}
@@ -1110,6 +1148,15 @@ class _Batch:
                                   or type(repeats) is not int or not 1 <= repeats <= 20):
             raise InvalidOperation("repeating follow-ups need repeat_every_days 1..90 and max_repeats 1..20")
         recipient = self.member(op.get("recipient_principal_id") or self.owner_id, "recipient_principal_id")
+        if self.role_of(recipient) not in ("owner", "editor"):
+            # Chasing an outsider is external communication: the owner must ask for it in a real message,
+            # and it can only be about something that person asked for or is responsible for.
+            self.owner_only("set a reminder that goes to someone outside the team", op)
+            concerns = task["requester_id"] == recipient or self.c.execute(
+                "SELECT 1 FROM dependencies WHERE workspace_id=? AND task_id=? AND responsible_principal_id=?",
+                (self.ws, task["id"], recipient)).fetchone()
+            if not concerns:
+                raise Forbidden("an outside recipient can only be reminded about their own request or dependency")
         dedupe = op.get("dedupe_key") or f"{self.ws}:{task['id']}:{kind}:{due_at}:{dep_id or ''}:{recipient}"
         existing = self.c.execute("SELECT id,task_id,due_at FROM reminders WHERE dedupe_key=?", (dedupe,)).fetchone()
         if existing is not None:
@@ -1166,9 +1213,7 @@ class _Batch:
         kind = op.get("request_kind")
         if kind not in ("input", "decision", "review", "execution", "exception"):
             raise InvalidOperation("unsupported request_kind", field="request_kind")
-        urgency = op.get("urgency", "batch")
-        if urgency not in ("batch", "notify", "interrupt"):
-            raise InvalidOperation("urgency must be batch, notify or interrupt", field="urgency")
+        urgency = self.urgency(op)
         request_id = self.s._new_id("hum")
         try:
             self.c.execute(
@@ -1181,16 +1226,27 @@ class _Batch:
         except sqlite3.IntegrityError as exc:
             raise InvalidOperation("assignee must be an active human member") from exc
         self.bind(op, request_id)
-        if urgency in ("notify", "interrupt"):
-            self.c.execute(
-                """INSERT INTO delivery_outbox(id,workspace_id,task_id,recipient_principal_id,channel,payload_json,
-                     dedupe_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
-                (self.s._new_id("dlv-out"), self.ws, task["id"], assignee, "telegram",
-                 _dumps({"text": ("【急】" if urgency == "interrupt" else "") + "需要你处理：" + _text(op.get("title"), "title"),
-                         "human_action_id": request_id}), f"human:{request_id}", self.now, self.now))
+        self.announce(task["id"], assignee, urgency, _text(op.get("title"), "title"), request_id)
         return {"task_id": task["id"], "human_action_id": request_id,
                 "event_id": self.event(task["id"], "human_action_requested", op, evidence, after={
                     "human_action_id": request_id, "assignee": assignee, "kind": kind, "urgency": urgency})}
+
+    def urgency(self, op: dict) -> str:
+        urgency = op.get("urgency", "batch")
+        if urgency not in ("batch", "notify", "interrupt"):
+            raise InvalidOperation("urgency must be batch, notify or interrupt", field="urgency")
+        # An outside requester's messages never interrupt the owner; they wait for the digest.
+        return "batch" if self.role == "requester" else urgency
+
+    def announce(self, task_id: str, assignee: str, urgency: str, title: str, request_id: str) -> None:
+        if urgency not in ("notify", "interrupt"):
+            return
+        self.c.execute(
+            """INSERT INTO delivery_outbox(id,workspace_id,task_id,recipient_principal_id,channel,payload_json,
+                 dedupe_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (self.s._new_id("dlv-out"), self.ws, task_id, assignee, "telegram",
+             _dumps({"text": ("【急】" if urgency == "interrupt" else "") + "需要你处理：" + title,
+                     "human_action_id": request_id}), f"human:{request_id}", self.now, self.now))
 
     def op_respond_human_action(self, op: dict, evidence: str) -> dict:
         request_id = self.ref(op.get("human_action_id"))
@@ -1205,6 +1261,7 @@ class _Batch:
             raise InvalidOperation("status must be completed or declined", field="status")
         if evidence not in STRONG_EVIDENCE or not op.get("source_ref"):
             raise EvidenceRequired("a human response needs explicit evidence and the source message ref")
+        self.cites_message(op, "answering a human request", sender=self.actor.principal_id)
         self.c.execute(
             """UPDATE human_action_requests SET status=?, response_json=?, response_source_ref=?,
                  responded_at=?, updated_at=? WHERE id=?""",

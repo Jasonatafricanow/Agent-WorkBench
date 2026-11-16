@@ -55,6 +55,24 @@ class Base(unittest.TestCase):
     def apply(self, actor, key, *ops):
         return self.svc.apply(actor=actor, idempotency_key=key, operations=list(ops))
 
+    def sent_delivery(self, key="d1"):
+        """A delivery the carrier confirmed (what a real SUBMITTED receipt points at)."""
+        with closing(sqlite3.connect(self.db)) as c, c:
+            c.execute("""INSERT INTO delivery_outbox(id,workspace_id,recipient_principal_id,channel,payload_json,status,
+                           provider_message_id,dedupe_key,created_at,updated_at)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)""", (key, "ws", "gao", "telegram", "{}", "sent", "tg-88", key, NOW, NOW))
+        return key
+
+    def inbox_from(self, principal, n=1):
+        """A message `principal` really sent (what an acceptance source_ref points at)."""
+        ref = f"tg://bot/{principal}/{n}"
+        with closing(sqlite3.connect(self.db)) as c, c:
+            c.execute("""INSERT INTO inbox_messages(id,workspace_id,platform,bot_id,update_id,chat_id,message_id,
+                           sender_principal_id,raw_source_ref,received_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                      (f"in-{principal}-{n}", "ws", "telegram", "bot", f"u-{principal}-{n}", principal, str(n), principal,
+                       ref, NOW, NOW))
+        return ref
+
     def task(self, key="t", **kw):
         return self.apply(self.owner, key, {"op": "create_task", "title": "Report", "state": "DOING",
                                             "evidence_type": "explicit_user", **kw})[0]["task_id"]
@@ -105,13 +123,19 @@ class BusinessObjectTests(Base):
         with self.assertRaises(EvidenceRequired):  # the model saying "sent" is not a receipt
             self.apply(self.agent, "s0", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 2,
                                           "status": "SUBMITTED", "evidence_type": "explicit_user"})
+        with self.assertRaises(EvidenceRequired):  # a receipt string that no carrier confirmed
+            self.apply(self.agent, "s0b", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 2,
+                                           "status": "SUBMITTED", "evidence_type": "verified_tool", "receipt_ref": "made-up"})
         self.apply(self.agent, "s1", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 2,
-                                      "status": "SUBMITTED", "evidence_type": "verified_tool", "receipt_ref": "tg-msg-88"})
+                                      "status": "SUBMITTED", "evidence_type": "verified_tool", "receipt_ref": self.sent_delivery()})
         with self.assertRaises(InvalidOperation):  # cannot skip back to DRAFT
             self.apply(self.agent, "s2", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 3,
                                           "status": "DRAFT", "evidence_type": "explicit_user", "source_ref": SRC})
+        with self.assertRaises(EvidenceRequired):  # the Agent cannot accept its own work
+            self.apply(self.agent, "s3a", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 3,
+                                           "status": "ACCEPTED", "evidence_type": "explicit_user", "source_ref": "tg://gao/9"})
         self.apply(self.agent, "s3", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 3,
-                                      "status": "ACCEPTED", "evidence_type": "explicit_user", "source_ref": "tg://gao/9"})
+                                      "status": "ACCEPTED", "evidence_type": "explicit_user", "source_ref": self.inbox_from("gao")})
         view = self.svc.read(actor=self.owner, task_id=t)
         self.assertEqual(view["deliverables"][0]["status"], "ACCEPTED")
         self.assertEqual(view["task"]["state"], "DOING")  # accepted deliverable does not auto-complete the task
@@ -312,9 +336,9 @@ class GapFillTests(Base):
         did = self.apply(self.agent, "dl", {"op": "register_deliverable", "task_id": t, "expected_version": 2,
                                             "title": "R", "artifact_ref": "f", "evidence_type": "explicit_user"})[0]["deliverable_id"]
         self.apply(self.agent, "sub", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 3,
-                                       "status": "SUBMITTED", "evidence_type": "verified_tool", "receipt_ref": "m1"})
+                                       "status": "SUBMITTED", "evidence_type": "verified_tool", "receipt_ref": self.sent_delivery()})
         self.apply(self.agent, "acc", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 4,
-                                       "status": "ACCEPTED", "evidence_type": "explicit_user", "source_ref": SRC})
+                                       "status": "ACCEPTED", "evidence_type": "explicit_user", "source_ref": self.inbox_from("gao")})
         out = review_delegations(self.db, now=NOW)
         self.assertEqual(out, [{"task_id": t, "review_requested": "agent_supervised"}])
         self.assertEqual(review_delegations(self.db, now=NOW), [])  # one pending review, not one per run

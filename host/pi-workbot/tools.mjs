@@ -10,6 +10,8 @@ const require = createRequire((process.env.PI_RUNTIME || '/opt/xiyue-runtime') +
 const { Type } = require('typebox');
 const MEM = (process.env.MRMEM_URL || 'http://127.0.0.1:8880').replace(/\/$/, '');
 const MEM_SCOPE = process.env.WORKBOT_MEMORY_SCOPE || 'workbench';
+const AGENT_IDENTITY = { provider: 'host', bot_id: process.env.WORKBOT_BOT_ID || 'workbot',
+  external_user_id: process.env.WORKBOT_AGENT_EXTERNAL_ID || 'agent' };
 export const RETRY_FILE = path.join(process.env.WORKBOT_WORK_DIR || '/workbot/workspace', 'memory-retry.jsonl');
 
 // Replay queued memory writes (called by the gateway loop). Keeps lines that still fail.
@@ -19,7 +21,12 @@ export async function retryMemoryWrites() {
   const left = [];
   for (const line of lines) {
     try {
-      const { path: p, body } = JSON.parse(line);
+      const { path: p, body, identity } = JSON.parse(line);
+      // Re-check the grant at replay time: a revoked grant drops the queued write.
+      const allowed = await wb('/v1/memory/authorize', { identity: identity || AGENT_IDENTITY, action: 'memory.write' })
+        .then(() => true).catch(error => (error.status === 403 ? false : null));
+      if (allowed === false) continue;
+      if (allowed === null) { left.push(line); continue; }
       const response = await fetch(MEM + p, { method: 'POST', signal: AbortSignal.timeout(8000),
         headers: { Authorization: 'Bearer ' + (process.env.MRMEM_TOKEN || ''), 'Content-Type': 'application/json' },
         body: JSON.stringify(body) });
@@ -42,12 +49,17 @@ export function createWorkbenchTools(sessionManager) {
     catch (error) { return { ...out({ error: error.code || 'ERROR', message: error.message, details: error.details }), isError: true }; }
   };
   const memory = async (path, body, { retry = false } = {}) => {
-    // The verified sender must hold a memory grant for this workspace (requesters normally do not).
+    // Reading: the person in this chat must hold a grant (requesters normally do not), so nothing private
+    // reaches their turn. Writing at wrap-up is done by the handling Agent, under the Agent's own grant.
+    const current = turn();
+    const identity = path === '/search' ? current.identity : (current.agentIdentity || AGENT_IDENTITY);
+    let grant;
     try {
-      await wb('/v1/memory/authorize', { identity: turn().identity, action: path === '/search' ? 'memory.read' : 'memory.write' });
+      grant = await wb('/v1/memory/authorize', { identity, action: path === '/search' ? 'memory.read' : 'memory.write' });
     } catch {
-      return { ...out({ error: 'MEMORY_FORBIDDEN', message: 'no memory access for this person' }), isError: true };
+      return { ...out({ error: 'MEMORY_FORBIDDEN', message: 'no memory access for this identity' }), isError: true };
     }
+    body = { ...body, user_id: grant.memory_user_id };
     try {
       const response = await fetch(MEM + path, {
         method: 'POST', signal: AbortSignal.timeout(8000),
@@ -58,7 +70,7 @@ export function createWorkbenchTools(sessionManager) {
       return out(await response.json());
     } catch (error) {
       if (retry) {  // the write has a deterministic id, so the gateway can replay it safely later
-        fs.appendFileSync(RETRY_FILE, JSON.stringify({ path, body: { ...body, scope: MEM_SCOPE, collection: 'memory' } }) + '\n');
+        fs.appendFileSync(RETRY_FILE, JSON.stringify({ path, identity, body: { ...body, scope: MEM_SCOPE, collection: 'memory' } }) + '\n');
         return out({ queued: true, message: 'memory service unavailable; write queued for retry' });
       }
       return out({ error: 'MEMORY_UNAVAILABLE', message: String(error.message).slice(0, 120) });
@@ -94,6 +106,20 @@ export function createWorkbenchTools(sessionManager) {
       description: 'Changes since this identity last looked (empty = nothing new). Use instead of re-reading everything.',
       parameters: Type.Object({}),
       execute: async () => call('/v1/tools/whats_new', { view: 'workbot', mark_seen: true }) },
+    { name: 'send_external_message', label: '对外发消息',
+      description: 'Send a message to someone (e.g. a requester) on behalf of the owner about a specific task. Always goes through the delegation/approval guard; if it is blocked, stop and say it awaits approval. Not for replying in the current chat — just reply normally there.',
+      parameters: Type.Object({ task_id: Type.String({ minLength: 1 }), recipient_principal_id: Type.String({ minLength: 1 }),
+        text: Type.String({ minLength: 1, maxLength: 3500 }), new_recipient: Type.Optional(Type.Boolean()) }),
+      execute: async (toolCallId, { task_id, recipient_principal_id, text }) => {
+        const current = turn();
+        try {
+          const result = await wb('/v1/delivery/enqueue', { recipient_id: recipient_principal_id, channel: 'telegram',
+            payload: { text, kind: 'external_message' }, task_id, dedupe_key: `ext:${current.wakeEventId || 'adhoc'}:${toolCallId}` });
+          return out({ queued: result.delivery_id, note: 'queued for delivery; it is only "sent" once the carrier confirms' });
+        } catch (error) {
+          return { ...out({ error: error.code || 'ERROR', message: error.message }), isError: true };
+        }
+      } },
     { name: 'work_memory_search', label: '检索工作记忆',
       description: 'Search work-scoped memory for past decisions and context. Background only; current task state always comes from get_task.',
       parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 500 }) }),

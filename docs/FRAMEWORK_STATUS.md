@@ -66,6 +66,29 @@ asked for the full framework first; a detailed audit and fixes come next.
 | No backup / restore check | ACCEPTANCE A26 | `backup` (online, keeps 14, daily when `WORKBENCH_BACKUP_DIR` set), `verify` |
 | Dashboard lacked "due this week", "upcoming follow-ups" | DOMAIN_CONTRACT §7 | added |
 
+## Second audit (2026-11-17): design deviations, omissions, new bugs — all fixed
+
+| # | Finding | Fix |
+|---|---|---|
+| A1 | A reminder could target the requester; a full-context background Run's reply was sent to them | outsider reminders need the owner's real message and must concern the outsider's own request/dependency; they are delivered as fixed text with no model Run; background replies only go to team members |
+| A2 | Narrowing/lowering a profile left existing delegations on the old envelope | publishing re-narrows every active delegation of the class (or pauses it); a retired profile routes to owner approval |
+| A3 | An Agent could fabricate its own promotion evidence | SUBMITTED needs a carrier-confirmed delivery; acceptance needs a real human's inbox message |
+| A4 | A human request could be "answered" by the model | the answer must cite the assignee's real message |
+| A5 | Requesters could trigger interrupts | requester requests are always `batch` |
+| A6 | Memory: write checked against the chat person; no user binding; retries skipped revocation | reading is checked for the chat person, the wrap-up write for the handling Agent; `memory_user_id` is passed to MR-Mem; queued retries re-authorize |
+| A7 | `propose_change` urgency unvalidated and never announced | shared urgency rules + announcement |
+| B1 | After a handoff nobody ran as the new executor | claim returns `executor_id`; the Host runs background work as that Agent (`WORKBOT_AGENTS`) in its own lane; the guard evaluates as that Agent |
+| B2 | No guarded outward tool existed | `send_external_message` (always guarded; `new_recipient` triggers the approval condition) |
+| B3 | Recurring occurrences lost delegation | an owner-approved `template.delegate` is applied to each occurrence, capped by the profile active at that time |
+| B4 | No session cross-evidence | the wake event ids are appended into the Pi session (`workbench-wake` entry) |
+| B5 | No "recently done" | added to overview and dashboard |
+| B6 | Load view had no suggestions | concrete soft-due move suggestions (official dues never move) |
+| B7 | Auto-promotion was silent | task event, version bump and an owner notice |
+| C1 | Repeating chases burst after downtime | skip to the first future slot, counting missed ones |
+| C2 | "Missing from the list" asked every month | asked once while pending |
+| C3 | Requesters didn't see their official due move | they now see it (without internal fields) |
+| C4 | A requester could be made a task's assignee | assignee limited to owner/editor |
+
 Remaining known gaps: the Telegram gateway has not run with a real bot token; MR-Mem
 side of the memory pointer queue is not consumed; message deletions and attachments are
 not handled; dashboard has no filters by project/requester yet.

@@ -28,6 +28,10 @@ const { Bot } = require('grammy');
 const env = process.env;
 const BOT_ID = env.WORKBOT_BOT_ID || 'workbot';
 const AGENT_IDENTITY = { provider: 'host', bot_id: BOT_ID, external_user_id: env.WORKBOT_AGENT_EXTERNAL_ID || 'agent' };
+// Agents this Host runs: principal_id -> external id bound under provider "host" (default: just the one Agent).
+const AGENTS = JSON.parse(env.WORKBOT_AGENTS || '{}');
+const agentIdentityFor = principal => (principal && AGENTS[principal]
+  ? { provider: 'host', bot_id: BOT_ID, external_user_id: AGENTS[principal] } : AGENT_IDENTITY);
 const AGENT_DIR = env.WORKBOT_AGENT_DIR || '/workbot/agent';
 const WORK_DIR = env.WORKBOT_WORK_DIR || '/workbot/workspace';
 const LEDGER = path.join(WORK_DIR, 'ledger.jsonl');
@@ -86,11 +90,11 @@ function inLane(chatKey, job) {
 }
 
 async function runTurn({ chatKey, chatId, identity, wakeEventId, taskId, sourceRef, text, sessionFile,
-                         extraWakeIds = [], inboxIds = [], role }) {
+                         extraWakeIds = [], inboxIds = [], role, agentIdentity = AGENT_IDENTITY }) {
   const { session, manager } = await sessionFor(chatKey, sessionFile);
   const sessionId = manager.getSessionId();
   const file = manager.getSessionFile?.() || sessionFile || '';
-  const turn = { identity, wakeEventId, taskId, sourceRef, sessionFile: file };
+  const turn = { identity, wakeEventId, extraWakeIds, taskId, sourceRef, sessionFile: file, agentIdentity };
   setTurn(sessionId, turn);
   for (const id of [wakeEventId, ...extraWakeIds]) {
     record({ event_id: id, status: 'running', chat_key: chatKey, chat_id: chatId, session_file: file, identity });
@@ -218,7 +222,7 @@ bot.on('edited_message:text', async ctx => {
 
 // -------------------------------------------------------- wake events loop
 const EVENT_PROMPTS = {
-  timer_fired: '一个提醒或周期任务到点了。先 get_task 看当前状态：条件已不成立就不打扰主人；需要主人知道或行动，就用一两句话说明（会转给主人）。',
+  timer_fired: '一个提醒或周期任务到点了。先 get_task 看当前状态：条件已不成立就不打扰；需要知道或行动，就用一两句话说明（只会发给团队内部的人，不会发给外部请求方）。',
   external_change: '外部状态变了（例如 CI、文件、对方回复）。核对任务，更新进度/依赖；需要主人知道才说。',
   human_action_completed: '主人回复了一个待办请求。读取任务和回复内容，按回复继续推进。',
   approval_decided: '审批有结果了。若已批准，用完全相同的参数重新发起刚才被拦下的调用；若被拒绝或过期，告诉对方并停止。',
@@ -231,7 +235,10 @@ const EVENT_PROMPTS = {
 async function pollWake() {
   const event = await wb('/v1/wake/claim', { lease_seconds: 900 }).catch(() => null);
   if (!event) return false;
-  let chatKey = 'ops', identity = AGENT_IDENTITY, sessionFile, chatId = null;
+  // Background work runs as the Agent that currently executes the task (after a handoff: the new one),
+  // in that Agent's own ops lane.
+  const agentIdentity = agentIdentityFor(event.executor_id);
+  let chatKey = `ops-${agentIdentity.external_user_id}`, identity = agentIdentity, sessionFile, chatId = null;
   if (event.kind === 'approval_decided' && event.deferred_ref) {
     // Reopen the very session whose tool call was blocked; it keeps the original sender's identity.
     const blockedSession = event.deferred_ref.split('#')[0];
@@ -243,8 +250,8 @@ async function pollWake() {
   await inLane(chatKey, async () => {
     try {
       const reply = await runTurn({ chatKey, chatId, identity, wakeEventId: event.event_id, taskId: event.task_id,
-        sourceRef: event.source_ref, text, sessionFile });
-      if (reply && chatKey === 'ops') {
+        sourceRef: event.source_ref, text, sessionFile, agentIdentity });
+      if (reply && chatKey.startsWith('ops-')) {
         // A fired reminder goes to its own recipient; other background results go to the owner.
         await wb('/v1/delivery/enqueue', { recipient_id: event.recipient_id || OWNER_PRINCIPAL, channel: 'telegram',
           payload: { text: reply }, dedupe_key: `wake:${event.event_id}`, task_id: event.task_id }).catch(() => {});

@@ -85,6 +85,7 @@ def render_dashboard(tasks, actor, database: str, now: str) -> str:
                                                           f" · {e(c.get('due_local') or _local(c['due_at'], tz))}</div>")),
         ("交付物", _list(ov["deliverables_pending"], lambda d: f"{e(d['title'])}<div class=meta>{e(d['status'])} · 第 {d['revision']} 版</div>")),
         ("本周到期", _list(ov["due_this_week"], task_line)),
+        ("最近完成（7 天）", _list(ov["recently_done"], task_line)),
         ("即将催促/提醒", _list(ov["upcoming_followups"], lambda r: f"<a href='/task/{e(r['task_id'])}'>{e(r['title'])}</a>"
                                                          f"<div class=meta>{_local(r['due_at'], tz)} · 给 {e(names.get(r['recipient_principal_id'], ''))}"
                                                          f"{' · 还会重复 ' + str(r['repeats_left']) + ' 次' if r['repeats_left'] else ''}</div>")),
@@ -97,6 +98,10 @@ def render_dashboard(tasks, actor, database: str, now: str) -> str:
                                                 f"{' · 等待自 ' + _local(s['waiting_since'], tz) if s['waiting_since'] else ''}</div>")),
         ("排期过载的日子", _list([d for d in load["days"] if d["overloaded"]],
                               lambda d: f"{e(d['date'])}<div class=meta>{len(d['items'])} 项到期</div>", empty="没有")),
+        ("排期建议（只动 soft due）", _list(load.get("suggestions", []),
+                                    lambda s: f"<a href='/task/{e(s['task_id'])}'>{e(s['title'])}</a>"
+                                              f"<div class=meta>{e(s['from'])} → {e(s['to'])} · {e(s['basis'])}</div>",
+                                    empty="没有")),
     ]
     focus = "".join(focus_slot(n, ov["focus"].get(n)) for n in ("NOW", "NEXT1", "NEXT2"))
     body = "".join(f"<section><h2>{title}</h2>{content}</section>" for title, content in sections)

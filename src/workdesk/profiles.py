@@ -78,4 +78,47 @@ class DelegationProfileAdmin:
                  dumps(_actions(evidence_requirements, "evidence_requirements")),
                  dumps(escalation_policy or {}), dumps(promotion_policy or {}),
                  1 if auto_promotion_enabled else 0, owner.principal_id, owner.principal_id, now, now))
-            return {"profile_id": profile_id, "work_class": work_class, "version": version}
+            affected = self._renarrow(conn, owner, work_class, profile_id, version, max_autonomy_level,
+                                      set(allowed), set(reversible), set(review),
+                                      set(_actions(approval_conditions, "approval_conditions")), now)
+            return {"profile_id": profile_id, "work_class": work_class, "version": version, "delegations_updated": affected}
+
+    @staticmethod
+    def _renarrow(conn, owner, work_class, profile_id, version, max_level, allowed, reversible, review, conditions, now):
+        """Existing delegations of this class may only shrink to the new profile; if the result is not a
+        valid envelope (e.g. a new mandatory review action the task never had), the delegation is paused."""
+        changed = []
+        for r in conn.execute("""SELECT * FROM task_responsibilities WHERE workspace_id=? AND work_class=?
+                                 AND status='active' AND profile_id IS NOT NULL""", (owner.workspace_id, work_class)).fetchall():
+            old_allowed = set(json.loads(r["effective_allowed_actions_json"]))
+            new_allowed = old_allowed & allowed
+            new_rev = set(json.loads(r["effective_reversible_actions_json"])) & reversible & new_allowed
+            new_review = (set(json.loads(r["effective_review_actions_json"])) | review) & new_allowed
+            new_cond = set(json.loads(r["effective_approval_conditions_json"])) | conditions
+            level = min(LEVELS.index(r["autonomy_level"]), LEVELS.index(max_level))
+            valid = review <= new_allowed
+            status = "active" if valid else "paused"
+            conn.execute(
+                """UPDATE task_responsibilities SET profile_id=?, profile_version=?, autonomy_level=?,
+                     effective_allowed_actions_json=?, effective_reversible_actions_json=?, effective_review_actions_json=?,
+                     effective_approval_conditions_json=?, status=?, version=version+1, updated_by_principal_id=?, updated_at=?
+                   WHERE workspace_id=? AND task_id=?""",
+                (profile_id, version, LEVELS[level], json.dumps(sorted(new_allowed)), json.dumps(sorted(new_rev)),
+                 json.dumps(sorted(new_review)), json.dumps(sorted(new_cond)), status, owner.principal_id, now,
+                 owner.workspace_id, r["task_id"]))
+            narrowed = valid is False or new_allowed != old_allowed or LEVELS[level] != r["autonomy_level"]
+            if not narrowed:
+                continue
+            # An owner policy change, not the Agent's fault: recorded as "reviewed" so it never counts
+            # as a policy violation in promotion evidence.
+            conn.execute(
+                """INSERT INTO responsibility_events(id,workspace_id,task_id,event_type,from_actor_id,to_actor_id,
+                     from_autonomy_level,to_autonomy_level,profile_id,profile_version,actor_id,reason,evidence_json,
+                     occurred_at,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"resp-{uuid.uuid4().hex}", owner.workspace_id, r["task_id"], "reviewed",
+                 r["current_executor_id"], r["current_executor_id"], r["autonomy_level"], LEVELS[level], profile_id, version,
+                 owner.principal_id, f"profile {work_class} v{version} published" + ("" if valid else "; paused for re-assignment"),
+                 json.dumps({"profile_change": True, "removed_actions": sorted(old_allowed - new_allowed),
+                             "paused": not valid}), now, now))
+            changed.append(r["task_id"])
+        return changed

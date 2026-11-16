@@ -105,9 +105,11 @@ def fire_due(database: str | Path, *, now: str, batch: int = 100) -> dict:
     with write_transaction(database) as conn:
         _ensure_system(conn, now)
         reminders = conn.execute(
-            """SELECT r.*, t.state AS task_state, d.status AS dep_status FROM reminders r
+            """SELECT r.*, t.state AS task_state, t.title AS task_title, t.requester_id, d.status AS dep_status,
+                      d.awaited_outcome, m.role AS recipient_role FROM reminders r
                JOIN tasks t ON t.workspace_id=r.workspace_id AND t.id=r.task_id
                LEFT JOIN dependencies d ON d.workspace_id=r.workspace_id AND d.id=r.dependency_id
+               LEFT JOIN memberships m ON m.workspace_id=r.workspace_id AND m.principal_id=r.recipient_principal_id
                WHERE r.status='scheduled' AND r.due_at<=? ORDER BY r.due_at, r.id LIMIT ?""",
             (now, batch)).fetchall()
         for r in reminders:
@@ -121,16 +123,35 @@ def fire_due(database: str | Path, *, now: str, batch: int = 100) -> dict:
                 conn.execute("UPDATE reminders SET status='cancelled', updated_at=? WHERE id=?", (now, r["id"]))
                 cancelled.append(r["id"])
                 continue
-            wake_id = _wake(conn, r["workspace_id"], r["task_id"], "workbench.timer", r["id"], "timer_fired",
-                            f"workdesk://{r['workspace_id']}/reminders/{r['id']}", now)
+            if r["recipient_role"] not in ("owner", "editor"):
+                # Chasing an outsider: a fixed, owner-approved text about their own request only.
+                # No model Run, so nothing from the workspace's private context can leak into it.
+                subject = r["task_title"] if r["requester_id"] == r["recipient_principal_id"] else (r["awaited_outcome"] or "")
+                conn.execute(
+                    """INSERT OR IGNORE INTO delivery_outbox(id,workspace_id,task_id,reminder_id,recipient_principal_id,channel,
+                         payload_json,dedupe_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (_new("dlv-out"), r["workspace_id"], r["task_id"], r["id"], r["recipient_principal_id"], r["channel"],
+                     json.dumps({"text": f"提醒：{subject}，方便时回复一下进展，谢谢。", "kind": "external_followup"},
+                                ensure_ascii=False), f"reminder:{r['id']}", now, now))
+                wake_id = None
+            else:
+                wake_id = _wake(conn, r["workspace_id"], r["task_id"], "workbench.timer", r["id"], "timer_fired",
+                                f"workdesk://{r['workspace_id']}/reminders/{r['id']}", now)
             conn.execute("UPDATE reminders SET status='sent', attempts=attempts+1, updated_at=? WHERE id=?",
                          (now, r["id"]))
             fired.append({"reminder_id": r["id"], "wake_event_id": wake_id})
             if r["repeat_every_days"] and (r["repeats_left"] or 0) > 0:
                 # "every Wednesday until they answer": the next one is a new row in the same series,
                 # so cancelling the series (dependency resolved, task closed) stops all of it.
-                nxt = (datetime.fromisoformat(r["due_at"][:-1]) + timedelta(days=r["repeat_every_days"])
-                       ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                # After downtime, skip forward to the first future slot and count the missed ones.
+                step = timedelta(days=r["repeat_every_days"])
+                nxt_dt, left = datetime.fromisoformat(r["due_at"][:-1]) + step, r["repeats_left"]
+                now_dt = datetime.fromisoformat(now[:-1])
+                while nxt_dt <= now_dt and left > 0:
+                    nxt_dt, left = nxt_dt + step, left - 1
+                if left <= 0:
+                    continue
+                nxt = nxt_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                 series = r["series_id"] or r["id"]
                 conn.execute(
                     """INSERT OR IGNORE INTO reminders(id,workspace_id,task_id,dependency_id,due_at,timezone,kind,condition,
@@ -138,7 +159,7 @@ def fire_due(database: str | Path, *, now: str, batch: int = 100) -> dict:
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (_new("rem"), r["workspace_id"], r["task_id"], r["dependency_id"], nxt, r["timezone"], r["kind"],
                      r["condition"], r["recipient_principal_id"], r["channel"], f"{series}:{nxt}", now, now,
-                     r["repeat_every_days"], r["repeats_left"] - 1, series))
+                     r["repeat_every_days"], left - 1, series))
 
         rules = conn.execute(
             "SELECT * FROM schedule_rules WHERE active=1 AND next_fire_at<=? ORDER BY next_fire_at LIMIT ?",
@@ -183,6 +204,7 @@ def _fire_rule(conn, rule, now: str) -> list[dict]:
                             f"workdesk://{ws}/schedules/{rule['id']}/{local}", now)
             conn.execute("INSERT INTO schedule_occurrences VALUES(?,?,?,?,?)",
                          (rule["id"], local, task_id, wake_id, now))
+            _inherit_delegation(conn, ws, task_id, template.get("delegate"), rule["created_by_principal_id"], now)
             out.append({"rule_id": rule["id"], "occurrence_local": local, "task_id": task_id,
                         "wake_event_id": wake_id, "skipped_before": skipped})
             count += 1
@@ -196,6 +218,39 @@ def _fire_rule(conn, rule, now: str) -> list[dict]:
         """UPDATE schedule_rules SET next_fire_local=?, next_fire_at=?, occurrences=?, active=?, updated_at=?
            WHERE id=?""", (local, at, count, active, now, rule["id"]))
     return out
+
+
+def _inherit_delegation(conn, ws: str, task_id: str, spec: dict | None, owner_id: str, now: str) -> None:
+    """Apply the schedule's delegation to a new occurrence, re-checked against the profile active NOW
+    (a profile narrowed since the schedule was made narrows the occurrence too)."""
+    if not spec:
+        return
+    from .profiles import LEVELS as LV
+    profile = conn.execute("SELECT * FROM delegation_profiles WHERE workspace_id=? AND work_class=? AND status='active'",
+                           (ws, spec.get("work_class"))).fetchone()
+    executor = conn.execute("SELECT 1 FROM memberships WHERE workspace_id=? AND principal_id=? AND active=1",
+                            (ws, spec.get("executor_id"))).fetchone()
+    if profile is None or executor is None:
+        return
+    level = LV[min(LV.index(spec.get("autonomy_level", "agent_prepares")), LV.index(profile["max_autonomy_level"]))]
+    allowed = sorted(set(spec.get("allowed_actions") or json.loads(profile["allowed_actions_json"]))
+                     & set(json.loads(profile["allowed_actions_json"])))
+    review = sorted(set(json.loads(profile["review_actions_json"])) & set(allowed))
+    if set(json.loads(profile["review_actions_json"])) - set(allowed):
+        return  # a mandatory review action is not delegated; leave the occurrence to the owner
+    conn.execute(
+        """INSERT INTO task_responsibilities(workspace_id,task_id,current_executor_id,profile_id,work_class,autonomy_level,
+             effective_allowed_actions_json,effective_reversible_actions_json,effective_review_actions_json,
+             effective_approval_conditions_json,profile_version,updated_by_principal_id,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (ws, task_id, spec["executor_id"], profile["id"], profile["work_class"], level, json.dumps(allowed),
+         json.dumps(sorted(set(json.loads(profile["reversible_actions_json"])) & set(allowed))), json.dumps(review),
+         profile["mandatory_approval_conditions_json"], profile["version"], owner_id, now))
+    conn.execute(
+        """INSERT INTO responsibility_events(id,workspace_id,task_id,event_type,to_actor_id,to_autonomy_level,profile_id,
+             profile_version,actor_id,reason,occurred_at,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (_new("resp"), ws, task_id, "delegated", spec["executor_id"], level, profile["id"], profile["version"], owner_id,
+         "recurring schedule delegation (owner-approved template)", now, now))
 
 
 def observe_watch(database: str | Path, *, workspace_id: str, watch_id: str, observed_value: str,

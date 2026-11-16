@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -82,4 +82,21 @@ def schedule_load(database: str | Path, *, actor: ActorContext, now: str, days: 
             per_day[day].append({"kind": "human_action", "id": r["id"], "title": r["title"]})
     days_out = [{"date": d, "items": items, "overloaded": len(items) > max_per_day}
                 for d, items in sorted(per_day.items())]
-    return {"days": days_out, "overloaded_days": [d["date"] for d in days_out if d["overloaded"]]}
+    load = {d["date"]: len(d["items"]) for d in days_out}
+    suggestions = []
+    for d in days_out:
+        movable = [i for i in d["items"] if i["kind"] == "task" and not i["official"]]
+        extra = len(d["items"]) - max_per_day
+        for item in movable[:max(0, extra)]:
+            day = date.fromisoformat(d["date"])
+            for back in range(1, days + 1):  # earlier is safer than later for a soft due
+                cand = (day - timedelta(days=back)).isoformat()
+                if cand >= datetime.fromisoformat(now[:-1] + "+00:00").astimezone(tz).date().isoformat() \
+                        and load.get(cand, 0) < max_per_day:
+                    load[cand] = load.get(cand, 0) + 1
+                    load[d["date"]] -= 1
+                    suggestions.append({"task_id": item["id"], "title": item["title"], "from": d["date"], "to": cand,
+                                        "basis": f"{d['date']} 有 {len(d['items'])} 项到期，超过每天 {max_per_day} 项"})
+                    break
+    return {"days": days_out, "overloaded_days": [d["date"] for d in days_out if d["overloaded"]],
+            "suggestions": suggestions}

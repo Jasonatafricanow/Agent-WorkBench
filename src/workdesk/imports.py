@@ -143,6 +143,12 @@ def import_rows(database: str | Path, *, actor: ActorContext, source_name: str, 
                 (ws, source_name)).fetchall():
             if gone["external_key"] in present:
                 continue
+            if conn.execute("""SELECT 1 FROM human_action_requests WHERE workspace_id=? AND task_id=?
+                               AND status IN ('pending','in_progress')
+                               AND json_extract(request_json,'$.kind')='import_missing'""",
+                            (ws, gone["task_id"])).fetchone():
+                summary["missing"].append(gone["external_key"])
+                continue
             ask(gone["task_id"], f"新表里没有了：{gone['title']}（已结？）",
                 {"kind": "import_missing", "external_key": gone["external_key"], "batch_id": batch_id})
             summary["missing"].append(gone["external_key"])

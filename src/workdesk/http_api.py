@@ -140,10 +140,19 @@ class WorkbenchApp:
                 row = conn.execute("SELECT deferred_ref FROM wake_events WHERE workspace_id=? AND id=?",
                                    (ws, event["event_id"])).fetchone()
             event["deferred_ref"] = row["deferred_ref"] if row else None
-            with closing(connect(self.db)) as conn:  # who a fired reminder is for
-                rem = conn.execute("SELECT recipient_principal_id FROM reminders WHERE workspace_id=? AND id=?",
-                                   (ws, event["origin_event_id"])).fetchone() if event["origin"] == "workbench.timer" else None
+            with closing(connect(self.db)) as conn:
+                # Who a fired reminder is for (team members only; outsiders get fixed-text follow-ups,
+                # never a model Run's reply) and which Agent currently executes the task.
+                rem = conn.execute(
+                    """SELECT r.recipient_principal_id FROM reminders r JOIN memberships m
+                         ON m.workspace_id=r.workspace_id AND m.principal_id=r.recipient_principal_id
+                       WHERE r.workspace_id=? AND r.id=? AND m.role IN ('owner','editor')""",
+                    (ws, event["origin_event_id"])).fetchone() if event["origin"] == "workbench.timer" else None
+                resp = conn.execute(
+                    "SELECT current_executor_id FROM task_responsibilities WHERE workspace_id=? AND task_id=? AND status='active'",
+                    (ws, event["task_id"])).fetchone() if event["task_id"] else None
             event["recipient_id"] = rem["recipient_principal_id"] if rem else None
+            event["executor_id"] = resp["current_executor_id"] if resp else None
         return event
 
     def _memory_authorize(self, body: dict) -> dict:

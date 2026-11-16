@@ -10,7 +10,10 @@
 import { readFileSync } from 'node:fs';
 import { wb } from '../workbench-client.mjs';
 
-const GUARDED: Record<string, any> = JSON.parse(process.env.WORKBOT_GUARDED_TOOLS || '{}');
+const GUARDED: Record<string, any> = {
+  send_external_message: { action: 'send_external_message', task_from: 'task_id', conditions_from: 'new_recipient' },
+  ...JSON.parse(process.env.WORKBOT_GUARDED_TOOLS || '{}'),
+};
 const PROMPT_FILE = process.env.WORKBOT_PROMPT_FILE || new URL('./WORKBOT.md', import.meta.url).pathname;
 const APPROVAL_HOURS = Number(process.env.WORKBOT_APPROVAL_HOURS || 24);
 // Delegation is evaluated for the Agent that executes, not for the person who is chatting.
@@ -18,7 +21,11 @@ const AGENT_IDENTITY = { provider: 'host', bot_id: process.env.WORKBOT_BOT_ID ||
   external_user_id: process.env.WORKBOT_AGENT_EXTERNAL_ID || 'agent' };
 
 export default function (pi: any) {
-  pi.on('before_agent_start', async (event: any) => {
+  pi.on('before_agent_start', async (event: any, ctx: any) => {
+    const turn = (globalThis as any).__workbotTurns?.get(ctx?.sessionManager?.getSessionId?.());
+    if (turn?.wakeEventId) {
+      try { pi.appendEntry('workbench-wake', { wake_event_ids: [turn.wakeEventId, ...(turn.extraWakeIds || [])] }); } catch {}
+    }
     let prompt = '';
     try { prompt = readFileSync(PROMPT_FILE, 'utf8'); } catch { prompt = ''; }
     return { systemPrompt: event.systemPrompt + '\n\n' + prompt };
@@ -37,7 +44,7 @@ export default function (pi: any) {
     let route = 'human_approval_required';
     if (taskId) {
       try {
-        route = (await wb('/v1/evaluate_action', { identity: AGENT_IDENTITY, task_id: taskId,
+        route = (await wb('/v1/evaluate_action', { identity: turn.agentIdentity || AGENT_IDENTITY, task_id: taskId,
           action: rule.action, triggered_conditions: conditions })).route;
       } catch { route = 'human_approval_required'; }
     }
