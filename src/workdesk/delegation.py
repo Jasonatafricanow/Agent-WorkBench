@@ -52,6 +52,10 @@ class DelegationEnvelope:
             raise ValueError("work_class is required")
         if self.autonomy_level > self.profile_max_level:
             raise ValueError("task autonomy cannot exceed the approved work-class profile")
+        if not self.profile_reversible_actions.issubset(self.profile_allowed_actions):
+            raise ValueError("profile reversible actions must be in its action allowlist")
+        if not self.profile_review_actions.issubset(self.profile_allowed_actions):
+            raise ValueError("profile review actions must be in its action allowlist")
         if not self.allowed_actions.issubset(self.profile_allowed_actions):
             raise ValueError("task actions cannot exceed the approved work-class allowlist")
         if not self.reversible_actions.issubset(self.profile_reversible_actions):
