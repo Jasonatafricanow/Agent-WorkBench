@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { wb } from './workbench-client.mjs';
-import { createWorkbenchTools } from './tools.mjs';
+import { createWorkbenchTools, retryMemoryWrites } from './tools.mjs';
 import { setTurn, clearTurn } from './turn-context.mjs';
 
 for (const file of (process.env.WORKBOT_ENV_FILES || '').split(',').filter(Boolean)) {
@@ -85,12 +85,16 @@ function inLane(chatKey, job) {
   return next;
 }
 
-async function runTurn({ chatKey, identity, wakeEventId, taskId, sourceRef, text, sessionFile }) {
+async function runTurn({ chatKey, identity, wakeEventId, taskId, sourceRef, text, sessionFile,
+                         extraWakeIds = [], inboxIds = [], role }) {
   const { session, manager } = await sessionFor(chatKey, sessionFile);
   const sessionId = manager.getSessionId();
   const file = manager.getSessionFile?.() || sessionFile || '';
-  setTurn(sessionId, { identity, wakeEventId, taskId, sourceRef, sessionFile: file });
-  record({ event_id: wakeEventId, status: 'running', chat_key: chatKey, session_file: file, identity });
+  const turn = { identity, wakeEventId, taskId, sourceRef, sessionFile: file };
+  setTurn(sessionId, turn);
+  for (const id of [wakeEventId, ...extraWakeIds]) {
+    record({ event_id: id, status: 'running', chat_key: chatKey, session_file: file, identity });
+  }
   const start = session.state.messages.length;
   try {
     await session.prompt(text);
@@ -99,9 +103,18 @@ async function runTurn({ chatKey, identity, wakeEventId, taskId, sourceRef, text
   }
   const reply = session.state.messages.slice(start).filter(m => m.role === 'assistant')
     .flatMap(m => m.content.filter(part => part.type === 'text').map(part => part.text)).join('\n').trim();
-  const outcome = { status: 'completed', run_ref: `${sessionId}:${wakeEventId}`, session_ref: file };
-  record({ event_id: wakeEventId, ...outcome });
-  await wb('/v1/wake/settle', { event_id: wakeEventId, ...outcome }).catch(() => {});
+  // Tie the source messages to every task this Run touched, so later edits can be traced to them.
+  if (inboxIds.length && turn.touched?.size) {
+    const ops = [...turn.touched].flatMap(task => inboxIds.map(inbox => ({ op: 'link_inbox', task_id: task, inbox_id: inbox,
+      relation: role === 'requester' ? 'request' : 'context', evidence_type: 'system' })));
+    await wb('/v1/tools/change_tasks', { identity, idempotency_key: `${wakeEventId}:links`, operations: ops.slice(0, 40) })
+      .catch(error => console.error('link failed:', error.code || error.message));
+  }
+  for (const id of [wakeEventId, ...extraWakeIds]) {
+    const outcome = { status: 'completed', run_ref: `${sessionId}:${wakeEventId}`, session_ref: file };
+    record({ event_id: id, ...outcome });
+    await wb('/v1/wake/settle', { event_id: id, ...outcome }).catch(() => {});
+  }
   return reply;
 }
 
@@ -128,6 +141,47 @@ bot.command(['approve', 'deny'], async ctx => {
   }
 });
 
+// Messages are stored durably the moment they arrive; messages sent in quick succession by the
+// same person are answered in one Run (merge window), and every one of their wake events is settled.
+const MERGE_MS = Number(env.WORKBOT_MERGE_MS || 2500);
+const pending = new Map(); // chatKey -> { ctx, items: [{intake, text, sourceRef}], timer }
+
+function queueForRun(chatKey, ctx, item) {
+  const key = `${chatKey}:${ctx.from.id}`; // never merge messages from different people (group chats)
+  const slot = pending.get(key) || { ctx, items: [], timer: null };
+  slot.items.push(item);
+  slot.ctx = ctx;
+  clearTimeout(slot.timer);
+  slot.timer = setTimeout(() => { pending.delete(key); flush(chatKey, slot).catch(() => {}); }, MERGE_MS);
+  pending.set(key, slot);
+}
+
+async function flush(chatKey, { ctx, items }) {
+  const first = items[0];
+  const identity = { provider: 'telegram', bot_id: BOT_ID, external_user_id: String(ctx.from.id) };
+  const text = items.map(i => `[${i.label} · 来自 ${i.intake.actor.principal_id}（${i.intake.actor.role}）· source_ref ${i.sourceRef}]\n${i.text}`).join('\n\n');
+  await inLane(chatKey, async () => {
+    const typing = setInterval(() => ctx.replyWithChatAction('typing').catch(() => {}), 4500);
+    const ok = await (async () => {
+      try {
+        const reply = await runTurn({ chatKey, identity, wakeEventId: first.intake.wake_event_id, sourceRef: first.sourceRef,
+          text, extraWakeIds: items.slice(1).map(i => i.intake.wake_event_id),
+          inboxIds: items.map(i => i.intake.inbox_id), role: first.intake.actor.role });
+        if (reply) await sendLong(ctx.chat.id, reply);
+        return true;
+      } catch (error) {
+        console.error('turn failed:', String(error?.message || error).slice(0, 200));
+        await ctx.reply('这次没处理完，已经记在工作台，稍后会再看。').catch(() => {});
+        return false;
+      }
+    })();
+    clearInterval(typing);
+    for (const item of items) {
+      if (item.label === '消息') await wb('/v1/intake/finish', { inbox_id: item.intake.inbox_id, ok }).catch(() => {});
+    }
+  });
+}
+
 bot.on('message:text', async ctx => {
   const sourceRef = `tg://${BOT_ID}/${ctx.chat.id}/${ctx.message.message_id}`;
   let intake;
@@ -140,24 +194,18 @@ bot.on('message:text', async ctx => {
   }
   if (intake.duplicate) return;
   if (!intake.accepted) return ctx.reply('这个账号还没有接入工作台。');
-  const identity = { provider: 'telegram', bot_id: BOT_ID, external_user_id: String(ctx.from.id) };
-  const chatKey = `tg-${ctx.chat.id}`;
-  const header = `[来自 ${intake.actor.principal_id}（${intake.actor.role}）· source_ref ${sourceRef} · ${new Date((ctx.message.date) * 1000).toISOString()}]\n`;
-  await inLane(chatKey, async () => {
-    const typing = setInterval(() => ctx.replyWithChatAction('typing').catch(() => {}), 4500);
-    try {
-      const reply = await runTurn({ chatKey, identity, wakeEventId: intake.wake_event_id, sourceRef,
-        text: header + ctx.message.text });
-      if (reply) await sendLong(ctx.chat.id, reply);
-      await wb('/v1/intake/finish', { inbox_id: intake.inbox_id, ok: true }).catch(() => {});
-    } catch (error) {
-      console.error('turn failed:', String(error?.message || error).slice(0, 200));
-      await ctx.reply('这次没处理完，已经记在工作台，稍后会再看。').catch(() => {});
-      await wb('/v1/intake/finish', { inbox_id: intake.inbox_id, ok: false }).catch(() => {});
-    } finally {
-      clearInterval(typing);
-    }
-  });
+  queueForRun(`tg-${ctx.chat.id}`, ctx, { intake, sourceRef, label: '消息', text: ctx.message.text });
+});
+
+bot.on('edited_message:text', async ctx => {
+  const message = ctx.editedMessage;
+  const sourceRef = `tg://${BOT_ID}/${ctx.chat.id}/${message.message_id}?edit=${ctx.update.update_id}`;
+  const intake = await wb('/v1/intake/edited', { platform: 'telegram', bot_id: BOT_ID, update_id: String(ctx.update.update_id),
+    chat_id: String(ctx.chat.id), message_id: String(message.message_id), external_user_id: String(ctx.from.id),
+    raw_source_ref: sourceRef }).catch(() => null);
+  if (!intake?.accepted || intake.duplicate) return;
+  const note = intake.linked_tasks?.length ? `（这条消息关联任务：${intake.linked_tasks.join(', ')}，请核对是否需要更正）` : '';
+  queueForRun(`tg-${ctx.chat.id}`, ctx, { intake, sourceRef, label: '编辑了之前的消息' + note, text: message.text });
 });
 
 // -------------------------------------------------------- wake events loop
@@ -234,6 +282,7 @@ setInterval(async () => {
   try {
     while (await pollWake()) { /* drain one lane at a time; WorkBench allows one live Run per workspace */ }
     await pumpDeliveries();
+    await retryMemoryWrites();
   } catch (error) {
     console.error('loop error:', String(error?.message || error).slice(0, 200));
   }

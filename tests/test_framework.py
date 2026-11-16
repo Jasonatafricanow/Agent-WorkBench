@@ -74,9 +74,9 @@ class MigrationTests(unittest.TestCase):
                 c.execute("INSERT INTO workspaces VALUES('w','W','o','UTC',?)", (NOW,))
                 c.execute("INSERT INTO tasks(id,workspace_id,title,created_at,updated_at) VALUES('t','w','Old',?,?)", (NOW, NOW))
             self.assertEqual(schema_version(db), 1)
-            self.assertEqual(migrate(db, backup_to=backup), [2])
+            self.assertEqual(migrate(db, backup_to=backup), [2, 3])
             self.assertEqual(migrate(db), [])
-            self.assertEqual(schema_version(db), 2)
+            self.assertEqual(schema_version(db), 3)
             with closing(sqlite3.connect(db)) as c:
                 self.assertEqual(c.execute("SELECT title, official_due_precision FROM tasks").fetchone(), ("Old", None))
             with closing(sqlite3.connect(backup)) as c:
@@ -290,6 +290,77 @@ class IntakeAndHttpTests(Base):
         with urllib.request.urlopen(urllib.request.Request(base + "/", headers={"Authorization": f"Basic {auth}"})) as r:
             page = r.read().decode("utf-8")
         self.assertIn("Please review the plan", page)
+
+
+class GapFillTests(Base):
+    def test_promotion_review_then_auto_promotion_from_recorded_outcomes(self):
+        from workdesk import DelegationProfileAdmin
+        from workdesk.promotion import review_delegations
+        admin = DelegationProfileAdmin(self.db, clock=self.clock)
+        policy = {"min_verified_successes": 1, "min_acceptance_ratio": 1.0, "max_rework_ratio": 0.0}
+        admin.publish(owner=self.owner, work_class="report", max_autonomy_level="agent_bounded",
+                      allowed_actions=["draft", "send"], reversible_actions=["draft"], promotion_policy=policy)
+        t = self.task()
+        self.apply(self.owner, "del", {"op": "assign_responsibility", "task_id": t, "expected_version": 1,
+                                       "executor_id": "agent", "work_class": "report", "autonomy_level": "agent_prepares",
+                                       "evidence_type": "explicit_user", "source_ref": SRC, "reason": "try it"})
+        self.assertEqual(review_delegations(self.db, now=NOW), [])  # no outcomes yet
+        did = self.apply(self.agent, "dl", {"op": "register_deliverable", "task_id": t, "expected_version": 2,
+                                            "title": "R", "artifact_ref": "f", "evidence_type": "explicit_user"})[0]["deliverable_id"]
+        self.apply(self.agent, "sub", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 3,
+                                       "status": "SUBMITTED", "evidence_type": "verified_tool", "receipt_ref": "m1"})
+        self.apply(self.agent, "acc", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 4,
+                                       "status": "ACCEPTED", "evidence_type": "explicit_user", "source_ref": SRC})
+        out = review_delegations(self.db, now=NOW)
+        self.assertEqual(out, [{"task_id": t, "review_requested": "agent_supervised"}])
+        self.assertEqual(review_delegations(self.db, now=NOW), [])  # one pending review, not one per run
+        self.assertEqual(self.q("SELECT autonomy_level FROM task_responsibilities")[0][0], "agent_prepares")
+        admin.publish(owner=self.owner, work_class="report", max_autonomy_level="agent_bounded",
+                      allowed_actions=["draft", "send"], reversible_actions=["draft"], promotion_policy=policy,
+                      auto_promotion_enabled=True)
+        self.apply(self.owner, "del2", {"op": "assign_responsibility", "task_id": t, "expected_version": 5,
+                                        "executor_id": "agent", "work_class": "report", "autonomy_level": "agent_prepares",
+                                        "evidence_type": "explicit_user", "source_ref": SRC, "reason": "new profile"})
+        self.assertEqual(review_delegations(self.db, now=NOW), [{"task_id": t, "promoted_to": "agent_supervised"}])
+
+    def test_github_watch_adapter_maps_ci_and_pr_states(self):
+        from workdesk.watchers import ci_state, poll_watches
+        self.assertEqual(ci_state([]), "pending")
+        self.assertEqual(ci_state([{"status": "completed", "conclusion": "success"},
+                                   {"status": "completed", "conclusion": "failure"}]), "failure")
+        t = self.task()
+        self.apply(self.agent, "w", {"op": "add_watch", "task_id": t, "expected_version": 1, "source_kind": "github_pr",
+                                     "target_ref": "acme/repo#7", "expected_value": "merged", "evidence_type": "explicit_user"})
+        fake = lambda path: {"merged": True, "state": "closed"} if path.endswith("/pulls/7") else {}
+        out = poll_watches(self.db, now=NOW, fetch=fake)
+        self.assertTrue(out[0]["matched"])
+        self.assertEqual(self.q("SELECT COUNT(*) FROM wake_events WHERE kind='external_change'")[0][0], 1)
+
+    def test_edited_message_is_a_revision_linked_to_its_tasks(self):
+        from workdesk.identity import record_edit
+        bind_identity(self.db, provider="telegram", bot_id="workbot", external_user_id="111", principal_id="gao")
+        bind_identity(self.db, provider="telegram", bot_id="workbot", external_user_id="222", principal_id="owner")
+        args = dict(workspace_id="ws", platform="telegram", bot_id="workbot", chat_id="c", message_id="m1")
+        first = record_inbound(self.db, update_id="1", external_user_id="111", raw_source_ref=SRC, **args)
+        gao = ActorContext("ws", "gao", "requester", "telegram")
+        t = self.apply(gao, "g", {"op": "create_task", "title": "Review by Friday", "evidence_type": "explicit_user"})[0]["task_id"]
+        self.apply(gao, "l", {"op": "link_inbox", "task_id": t, "inbox_id": first["inbox_id"], "relation": "request",
+                              "evidence_type": "system"})
+        self.assertFalse(record_edit(self.db, update_id="2", external_user_id="222", raw_source_ref=SRC + "?e", **args)["accepted"])
+        edit = record_edit(self.db, update_id="3", external_user_id="111", raw_source_ref=SRC + "?e", **args)
+        self.assertEqual((edit["revision"], edit["linked_tasks"]), (2, [t]))
+        self.assertTrue(record_edit(self.db, update_id="3", external_user_id="111", raw_source_ref=SRC + "?e", **args)["duplicate"])
+        kinds = [e["kind"] for e in self.svc.read(actor=self.owner, task_id=t)["events"]]
+        self.assertIn("source_edited", kinds)
+
+    def test_dashboard_task_page_shows_history(self):
+        from workdesk.dashboard import render_task
+        t = self.task()
+        self.apply(self.owner, "p", {"op": "append_progress", "task_id": t, "expected_version": 1, "text": "outline done",
+                                     "evidence_type": "explicit_user", "reason": "outline done"})
+        page = render_task(self.svc, self.owner, str(self.db), t, NOW)
+        self.assertIn("进展", page)
+        self.assertIn("outline done", page)
 
 
 if __name__ == "__main__":

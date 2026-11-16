@@ -24,7 +24,7 @@ from .approvals import ApprovalService
 from .contracts import ActorContext
 from .dispatcher import Dispatcher
 from .errors import Forbidden, InvalidOperation, WorkbenchError
-from .identity import SqlIdentityProvider, finish_inbound, record_inbound
+from .identity import SqlIdentityProvider, finish_inbound, record_edit, record_inbound
 from .insights import schedule_load, stagnation
 from .outboxes import DeliveryOutbox, MemoryPointerQueue
 from .runtime_bridge import HostOutcome
@@ -65,7 +65,10 @@ class WorkbenchApp:
             "/v1/intake/inbound": lambda: record_inbound(self.db, clock=self.clock, **{k: body[k] for k in (
                 "workspace_id", "platform", "bot_id", "update_id", "chat_id", "message_id",
                 "external_user_id", "raw_source_ref")}, handled_inline=bool(body.get("handled_inline", True))),
-            "/v1/intake/finish": lambda: finish_inbound(self.db, workspace_id=ws, inbox_id=body["inbox_id"],
+            "/v1/intake/edited": lambda: record_edit(self.db, clock=self.clock, **{k: body[k] for k in (
+                "workspace_id", "platform", "bot_id", "update_id", "chat_id", "message_id",
+                "external_user_id", "raw_source_ref")}),
+            "/v1/intake/finish":lambda: finish_inbound(self.db, workspace_id=ws, inbox_id=body["inbox_id"],
                                                         ok=bool(body.get("ok")), clock=self.clock),
             "/v1/tools/list_tasks": lambda: self.tasks.overview(actor=self.actor(body), limit=int(body.get("limit", 50))),
             "/v1/tools/get_task": lambda: self.tasks.read(actor=self.actor(body), task_id=body.get("task_id")),
@@ -153,7 +156,7 @@ def _event_dict(event):
 
 
 def make_handler(app: WorkbenchApp):
-    from .dashboard import render_dashboard
+    from .dashboard import render_dashboard, render_task
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "WorkBench/1"
@@ -173,14 +176,21 @@ def make_handler(app: WorkbenchApp):
         def do_GET(self):
             if self.path.split("?")[0] == "/healthz":
                 return self._send(200, {"ok": True})
-            if self.path.split("?")[0] not in ("/", "/dashboard"):
+            route = self.path.split("?")[0]
+            if route not in ("/", "/dashboard") and not route.startswith("/task/"):
                 return self._send(404, {"code": "NOT_FOUND"})
             if not app.check_dashboard(self.headers.get("Authorization")):
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="WorkBench"')
                 self.end_headers()
                 return
-            page = render_dashboard(app.tasks, app.dashboard_actor, app.db, app.clock())
+            try:
+                if route.startswith("/task/"):
+                    page = render_task(app.tasks, app.dashboard_actor, app.db, route[len("/task/"):], app.clock())
+                else:
+                    page = render_dashboard(app.tasks, app.dashboard_actor, app.db, app.clock())
+            except WorkbenchError:
+                return self._send(404, {"code": "NOT_FOUND"})
             self._send(200, page.encode("utf-8"), "text/html")
 
         def do_POST(self):
@@ -209,12 +219,23 @@ def make_handler(app: WorkbenchApp):
 def serve(app: WorkbenchApp, *, host: str = "127.0.0.1", port: int = 8790, timer_seconds: int = 30) -> None:
     stop = threading.Event()
 
+    from .promotion import review_delegations
+    from .watchers import poll_watches
+
     def timers():
+        ticks = 0
         while not stop.wait(timer_seconds):
-            try:
-                fire_due(app.db, now=app.clock())
-            except Exception as exc:  # noqa: BLE001 - keep the timer alive; surface in logs
-                print(f"timer error: {exc}", flush=True)
+            ticks += 1
+            jobs = [("timers", lambda: fire_due(app.db, now=app.clock()))]
+            if ticks % max(1, 300 // timer_seconds) == 0:       # every ~5 minutes
+                jobs.append(("watches", lambda: poll_watches(app.db, now=app.clock())))
+            if ticks % max(1, 86400 // timer_seconds) == 1:     # once a day (and at start)
+                jobs.append(("delegation review", lambda: review_delegations(app.db, now=app.clock())))
+            for name, job in jobs:
+                try:
+                    job()
+                except Exception as exc:  # noqa: BLE001 - keep the loop alive; surface in logs
+                    print(f"{name} error: {exc}", flush=True)
 
     threading.Thread(target=timers, daemon=True).start()
     server = ThreadingHTTPServer((host, port), make_handler(app))

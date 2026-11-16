@@ -1,5 +1,7 @@
 // Agent-facing tools: the WorkBench facade (list/get/change/whats_new) plus work-scoped memory.
 // Memory is written by the Agent itself at the end of a turn (owner decision 11-17), like a handoff note.
+import fs from 'node:fs';
+import path from 'node:path';
 import { createRequire } from 'node:module';
 import { wb } from './workbench-client.mjs';
 import { getTurn } from './turn-context.mjs';
@@ -8,6 +10,25 @@ const require = createRequire((process.env.PI_RUNTIME || '/opt/xiyue-runtime') +
 const { Type } = require('typebox');
 const MEM = (process.env.MRMEM_URL || 'http://127.0.0.1:8880').replace(/\/$/, '');
 const MEM_SCOPE = process.env.WORKBOT_MEMORY_SCOPE || 'workbench';
+export const RETRY_FILE = path.join(process.env.WORKBOT_WORK_DIR || '/workbot/workspace', 'memory-retry.jsonl');
+
+// Replay queued memory writes (called by the gateway loop). Keeps lines that still fail.
+export async function retryMemoryWrites() {
+  if (!fs.existsSync(RETRY_FILE)) return 0;
+  const lines = fs.readFileSync(RETRY_FILE, 'utf8').split('\n').filter(Boolean);
+  const left = [];
+  for (const line of lines) {
+    try {
+      const { path: p, body } = JSON.parse(line);
+      const response = await fetch(MEM + p, { method: 'POST', signal: AbortSignal.timeout(8000),
+        headers: { Authorization: 'Bearer ' + (process.env.MRMEM_TOKEN || ''), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (!response.ok) left.push(line);
+    } catch { left.push(line); }
+  }
+  fs.writeFileSync(RETRY_FILE, left.length ? left.join('\n') + '\n' : '');
+  return lines.length - left.length;
+}
 const out = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], details: {} });
 
 export function createWorkbenchTools(sessionManager) {
@@ -20,7 +41,7 @@ export function createWorkbenchTools(sessionManager) {
     try { return out(await wb(path, { identity: turn().identity, ...body })); }
     catch (error) { return { ...out({ error: error.code || 'ERROR', message: error.message, details: error.details }), isError: true }; }
   };
-  const memory = async (path, body) => {
+  const memory = async (path, body, { retry = false } = {}) => {
     try {
       const response = await fetch(MEM + path, {
         method: 'POST', signal: AbortSignal.timeout(8000),
@@ -30,6 +51,10 @@ export function createWorkbenchTools(sessionManager) {
       if (!response.ok) throw Error('HTTP ' + response.status);
       return out(await response.json());
     } catch (error) {
+      if (retry) {  // the write has a deterministic id, so the gateway can replay it safely later
+        fs.appendFileSync(RETRY_FILE, JSON.stringify({ path, body: { ...body, scope: MEM_SCOPE, collection: 'memory' } }) + '\n');
+        return out({ queued: true, message: 'memory service unavailable; write queued for retry' });
+      }
       return out({ error: 'MEMORY_UNAVAILABLE', message: String(error.message).slice(0, 120) });
     }
   };
@@ -48,7 +73,15 @@ export function createWorkbenchTools(sessionManager) {
       execute: async (toolCallId, { operations }) => {
         const current = turn();
         // Idempotency key = the source event + this tool call, so a retried Run replays instead of duplicating.
-        return call('/v1/tools/change_tasks', { idempotency_key: `${current.wakeEventId || 'adhoc'}:${toolCallId}`, operations });
+        try {
+          const result = await wb('/v1/tools/change_tasks', { identity: current.identity,
+            idempotency_key: `${current.wakeEventId || 'adhoc'}:${toolCallId}`, operations });
+          current.touched ??= new Set();
+          for (const item of result || []) if (item.task_id) current.touched.add(item.task_id);
+          return out(result);
+        } catch (error) {
+          return { ...out({ error: error.code || 'ERROR', message: error.message, details: error.details }), isError: true };
+        }
       } },
     { name: 'whats_new', label: '自上次以来的变化',
       description: 'Changes since this identity last looked (empty = nothing new). Use instead of re-reading everything.',
@@ -64,7 +97,8 @@ export function createWorkbenchTools(sessionManager) {
       execute: async (toolCallId, { summary, source_ref }) => {
         const current = turn();
         return memory('/upsert', { id: `workbot:${current.wakeEventId || 'adhoc'}:${toolCallId}`, kind: 'aml-compiled-v1', text: summary,
-          sources: [{ store_id: 'workbench', source_namespace: 'workbot', record_id: source_ref || current.sourceRef || '' }] });
+          sources: [{ store_id: 'workbench', source_namespace: 'workbot', record_id: source_ref || current.sourceRef || '' }] },
+          { retry: true });
       } },
   ];
 }

@@ -91,6 +91,57 @@ def record_inbound(database: str | Path, *, workspace_id: str, platform: str, bo
                           "role": sender["role"], "source": platform}}
 
 
+def record_edit(database: str | Path, *, workspace_id: str, platform: str, bot_id: str, update_id: str,
+                chat_id: str, message_id: str, external_user_id: str, raw_source_ref: str,
+                lease_seconds: int = 600, clock: Callable[[], str] = utc_now) -> dict:
+    """An edited message becomes a new revision of the original inbox row; tasks that cite
+    the message get a `source_edited` event, and the edit re-enters the loop as a wake event."""
+    now = clock()
+    with write_transaction(database) as conn:
+        original = conn.execute(
+            """SELECT i.id, i.sender_principal_id, i.revision, m.role FROM inbox_messages i
+               LEFT JOIN memberships m ON m.workspace_id=i.workspace_id AND m.principal_id=i.sender_principal_id AND m.active=1
+               WHERE i.workspace_id=? AND i.platform=? AND i.bot_id=? AND i.chat_id=? AND i.message_id=?""",
+            (workspace_id, platform, bot_id, str(chat_id), str(message_id))).fetchone()
+        if original is None:
+            return {"accepted": False, "reason": "original message not recorded"}
+        sender = conn.execute(
+            "SELECT principal_id FROM external_identities WHERE provider=? AND bot_id=? AND external_user_id=?",
+            (platform, bot_id, str(external_user_id))).fetchone()
+        if sender is None or sender["principal_id"] != original["sender_principal_id"] or original["role"] is None:
+            return {"accepted": False, "reason": "editor is not the original sender"}
+        if conn.execute("SELECT 1 FROM inbox_revisions WHERE inbox_id=? AND update_id=?",
+                        (original["id"], str(update_id))).fetchone():
+            return {"accepted": True, "duplicate": True, "inbox_id": original["id"]}
+        revision = original["revision"] + 1
+        conn.execute("UPDATE inbox_messages SET revision=?, edited_at=?, raw_source_ref=?, updated_at=? WHERE id=?",
+                     (revision, now, raw_source_ref, now, original["id"]))
+        conn.execute("INSERT INTO inbox_revisions VALUES(?,?,?,?,?)",
+                     (original["id"], revision, str(update_id), raw_source_ref, now))
+        tasks = [r[0] for r in conn.execute(
+            "SELECT DISTINCT task_id FROM message_links WHERE workspace_id=? AND inbox_id=?",
+            (workspace_id, original["id"]))]
+        for task_id in tasks:
+            conn.execute(
+                """INSERT INTO task_events(id,workspace_id,task_id,actor_id,kind,after_json,reason,evidence_type,
+                     source_ref,occurred_at,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"evt-{uuid.uuid4().hex}", workspace_id, task_id, original["sender_principal_id"], "source_edited",
+                 f'{{"inbox_id":"{original["id"]}","revision":{revision}}}', "source message was edited",
+                 "explicit_user", raw_source_ref, now, now))
+            conn.execute("UPDATE tasks SET version=version+1, updated_at=? WHERE workspace_id=? AND id=?",
+                         (now, workspace_id, task_id))
+        wake_id = f"wake-{uuid.uuid4().hex}"
+        conn.execute(
+            """INSERT INTO wake_events(id,workspace_id,origin,origin_event_id,kind,source_ref,status,attempts,
+                 lease_until,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (wake_id, workspace_id, f"{platform}:{bot_id}:edit", str(update_id), "user_message", raw_source_ref,
+             "leased", 1, _plus(now, lease_seconds), now, now))
+        return {"accepted": True, "inbox_id": original["id"], "revision": revision, "linked_tasks": tasks,
+                "wake_event_id": wake_id,
+                "actor": {"workspace_id": workspace_id, "principal_id": original["sender_principal_id"],
+                          "role": original["role"], "source": platform}}
+
+
 def finish_inbound(database: str | Path, *, workspace_id: str, inbox_id: str, ok: bool,
                    clock: Callable[[], str] = utc_now) -> None:
     with write_transaction(database) as conn:
