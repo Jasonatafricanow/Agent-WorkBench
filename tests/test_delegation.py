@@ -17,9 +17,19 @@ def envelope(level, *, max_level=AutonomyLevel.AGENT_EXCEPTION_ONLY):
         work_class="routine_reporting",
         autonomy_level=level,
         profile_max_level=max_level,
+        profile_allowed_actions=frozenset({
+            "read_data", "draft_report", "send_internal_update", "send_external",
+        }),
+        profile_reversible_actions=frozenset({"read_data", "draft_report"}),
+        profile_approval_conditions=frozenset({
+            "new_recipient", "external_commitment", "financial_action",
+        }),
         allowed_actions=frozenset({"read_data", "draft_report", "send_internal_update"}),
         reversible_actions=frozenset({"read_data", "draft_report"}),
-        approval_conditions=frozenset({"new_recipient", "external_commitment", "financial_action"}),
+        approval_conditions=frozenset({
+            "new_recipient", "external_commitment", "financial_action",
+        }),
+        review_actions=frozenset({"send_internal_update"}),
         policy_version=3,
     )
 
@@ -57,6 +67,29 @@ class DelegationPolicyTests(unittest.TestCase):
                               triggered_conditions={"external_commitment"})
         self.assertEqual(result, ActionRoute.HUMAN_APPROVAL_REQUIRED)
 
+    def test_task_cannot_broaden_profile_actions_or_remove_approval_conditions(self):
+        args = dict(
+            work_class="routine_reporting",
+            autonomy_level=AutonomyLevel.AGENT_BOUNDED,
+            profile_max_level=AutonomyLevel.AGENT_EXCEPTION_ONLY,
+            profile_allowed_actions=frozenset({"read_data"}),
+            profile_reversible_actions=frozenset({"read_data"}),
+            profile_approval_conditions=frozenset({"external_commitment"}),
+            allowed_actions=frozenset({"read_data", "send_external"}),
+            reversible_actions=frozenset({"read_data"}),
+            approval_conditions=frozenset(),
+            review_actions=frozenset(),
+            policy_version=1,
+        )
+        with self.assertRaises(ValueError):
+            DelegationEnvelope(**args)
+
+    def test_bounded_level_can_require_post_execution_review_for_selected_actions(self):
+        self.assertEqual(
+            route_action(envelope(AutonomyLevel.AGENT_BOUNDED), action="send_internal_update"),
+            ActionRoute.AGENT_EXECUTE_WITH_REVIEW,
+        )
+
     def test_task_level_cannot_exceed_profile_ceiling(self):
         with self.assertRaises(ValueError):
             envelope(AutonomyLevel.AGENT_EXCEPTION_ONLY,
@@ -93,6 +126,10 @@ class DelegationPolicyTests(unittest.TestCase):
         )
         self.assertFalse(result.can_apply)
         self.assertTrue(any("policy violations" in x for x in result.reasons))
+
+    def test_invalid_negative_evidence_is_rejected(self):
+        with self.assertRaises(ValueError):
+            PromotionEvidence(3, 2, 2, -1, 0, True)
 
     def test_auto_promotion_requires_explicit_profile_opt_in(self):
         evidence = PromotionEvidence(6, 6, 6, 0, 0, True)
