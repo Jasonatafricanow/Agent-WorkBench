@@ -14,8 +14,10 @@
 ## 当前已提交
 
 - `src/workdesk/contracts.py`：固定已认证 ActorContext 的 Agent 工具门面、IdentityProvider / TaskService 协议；不承担实际身份认证
+- `src/workdesk/user_context.py`：SQL 授权检查，实现 MR-Mem 的 USER 作用域权限边界；默认拒绝、支持撤销
+- `db/schema.sql` 同时包含 `user_profiles` 与 `memory_context_grants`，身份映射与授权按工作空间隔离
 - `db/schema.sql`：SQL 初始 Schema（非迁移程序）
-- `tests/test_contracts.py`：工具作用域与参数契约测试
+- `tests/test_contracts.py`、`tests/test_schema.py`、`tests/test_user_context.py`：工具作用域、数据库隔离与用户记忆授权测试
 - `docs/ARCHITECTURE.md`、`docs/DOMAIN_CONTRACT.md`、`docs/MRMEM_INTEGRATION.md`：业务/记忆边界
 - `docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SQL_MIGRATION_POLICY.md`：施工与验收
 - `.github/workflows/quality.yml`：离线测试
