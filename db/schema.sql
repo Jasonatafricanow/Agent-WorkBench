@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY(workspace_id,project_id) REFERENCES projects(workspace_id,id),
+  FOREIGN KEY(workspace_id,assignee_id) REFERENCES memberships(workspace_id,principal_id),
   UNIQUE(workspace_id,id)
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(workspace_id,state,priority,updated_at);
@@ -328,6 +329,27 @@ CREATE TABLE IF NOT EXISTS delegation_profiles (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_delegation_profile
   ON delegation_profiles(workspace_id,work_class) WHERE status='active';
+CREATE TRIGGER IF NOT EXISTS trg_delegation_profile_owner_approval
+  BEFORE INSERT ON delegation_profiles
+  WHEN NOT EXISTS (
+    SELECT 1 FROM memberships m JOIN principals p ON p.id=m.principal_id
+    WHERE m.workspace_id=NEW.workspace_id
+      AND m.principal_id=NEW.approved_by_principal_id
+      AND m.role='owner' AND m.active=1 AND p.kind='human' AND p.active=1
+  )
+  BEGIN SELECT RAISE(ABORT,'delegation profile requires active human owner approval'); END;
+CREATE TRIGGER IF NOT EXISTS trg_delegation_profile_immutable
+  BEFORE UPDATE OF workspace_id,work_class,version,max_autonomy_level,
+    allowed_actions_json,reversible_actions_json,review_actions_json,
+    mandatory_approval_conditions_json,success_criteria_json,
+    evidence_requirements_json,escalation_policy_json,promotion_policy_json,
+    auto_promotion_enabled,created_by_principal_id,approved_by_principal_id,created_at
+  ON delegation_profiles
+  BEGIN SELECT RAISE(ABORT,'delegation profile is immutable; create a new version'); END;
+CREATE TRIGGER IF NOT EXISTS trg_delegation_profile_no_reactivate
+  BEFORE UPDATE OF status ON delegation_profiles
+  WHEN OLD.status='retired' AND NEW.status='active'
+  BEGIN SELECT RAISE(ABORT,'retired delegation profile cannot be reactivated'); END;
 
 -- tasks.assignee_id remains the accountable owner; current_executor_id is
 -- the person/Agent responsible for the next executable step.
@@ -446,3 +468,12 @@ CREATE TABLE IF NOT EXISTS human_action_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_human_action_inbox
   ON human_action_requests(workspace_id,assignee_principal_id,status,due_at);
+CREATE TRIGGER IF NOT EXISTS trg_human_action_assignee_is_human
+  BEFORE INSERT ON human_action_requests
+  WHEN NOT EXISTS (
+    SELECT 1 FROM memberships m JOIN principals p ON p.id=m.principal_id
+    WHERE m.workspace_id=NEW.workspace_id
+      AND m.principal_id=NEW.assignee_principal_id
+      AND m.active=1 AND p.kind='human' AND p.active=1
+  )
+  BEGIN SELECT RAISE(ABORT,'human action request assignee must be an active human member'); END;
