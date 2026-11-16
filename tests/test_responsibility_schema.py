@@ -79,6 +79,43 @@ class ResponsibilitySchemaTests(unittest.TestCase):
                      'agent_bounded',2,'owner',?)""", (NOW,),
             )
 
+    def test_only_active_human_owner_can_approve_delegation_profile(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.c.execute(
+                """INSERT INTO delegation_profiles(
+                     id,workspace_id,work_class,version,max_autonomy_level,
+                     created_by_principal_id,approved_by_principal_id,created_at,updated_at
+                   ) VALUES('bad-profile','a','external_comms',1,'agent_prepares',
+                     'owner','agent',?,?)""", (NOW, NOW),
+            )
+
+    def test_profile_policy_is_immutable_and_new_version_is_required(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.c.execute(
+                "UPDATE delegation_profiles SET max_autonomy_level='agent_exception_only' "
+                "WHERE id='profile-a'"
+            )
+        self.c.execute("UPDATE delegation_profiles SET status='retired' WHERE id='profile-a'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.c.execute("UPDATE delegation_profiles SET status='active' WHERE id='profile-a'")
+
+    def test_human_action_assignee_must_be_a_human(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.c.execute(
+                """INSERT INTO human_action_requests(
+                     id,workspace_id,task_id,requested_by_principal_id,assignee_principal_id,
+                     request_kind,title,created_at,updated_at
+                   ) VALUES('human-agent','a','task-a','owner','agent','decision','Invalid',?,?)""",
+                (NOW, NOW),
+            )
+
+    def test_accountable_task_owner_must_be_workspace_member(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.c.execute(
+                """INSERT INTO tasks(id,workspace_id,title,assignee_id,created_at,updated_at)
+                   VALUES('task-b','b','Wrong member','agent',?,?)""", (NOW, NOW),
+            )
+
     def test_only_one_active_profile_per_work_class(self):
         with self.assertRaises(sqlite3.IntegrityError):
             self.c.execute(
