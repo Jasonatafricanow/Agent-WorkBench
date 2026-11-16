@@ -86,3 +86,13 @@ but a production memory-outbox writer/consumer with lease/retry and real
 this remote WorkBench branch. Likewise, no actual Agent Host Run port has
 been connected. Existing `runtime_bridge` tests cover only the local
 event ledger and contract invariants.
+
+
+## Responsibility-transfer boundary
+
+MR-Mem can supply historical experience and user preferences that help the
+Agent understand how to perform a work class. It MUST NOT infer, grant, widen,
+promote or persist WorkBench execution authority. Delegation profiles,
+task-level action envelopes, human approvals and revocation are owned by
+WorkBench SQL; the Agent Host separately checks its tool policy at execution
+and resume time. Memory retrieval is context, never a capability.

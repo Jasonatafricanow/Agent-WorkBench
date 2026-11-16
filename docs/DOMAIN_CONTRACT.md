@@ -19,6 +19,13 @@
 
 时间全部存 UTC ISO-8601（含 UTC 标识），显示时按 Principal 的 IANA 时区。官方截止、软截止、计划启动、下次跟进、发生时间是独立字段。日粒度截止明确本地日与截止时间；缺少时区/时间时，不默认为当地午夜，不编造官方期限。
 
+| DelegationProfile | workspace、work_class、version、max_autonomy_level、action allowlist、approval conditions、evidence/promotion policy | 每类工作经 owner 批准的自主权上限 |
+| TaskResponsibility | current_executor、profile/version、autonomy_level、有效动作范围、success/evidence/escalation | 每个任务由谁推进，以及 Agent 可做到什么程度 |
+| ResponsibilityEvent | from/to actor、from/to level、event、reason、evidence、source_ref | 委派、升级、降级、人工接管和撤权的审计历史 |
+| HumanActionRequest | assignee、input/decision/review/execution、due、urgency、response | 人类作为循环中的执行者/决策者，而不只是工具审批人 |
+
+## 2. 任务状态机
+
 ## 2. 任务状态机
 
 核心状态：
@@ -80,6 +87,26 @@ WAITING 与 BLOCKED 有差别：等待反馈本身是一项可追踪的承诺，
 ```
 
 对外 Agent 不开放任意 `set_focus`/修改 owner 私人任务的权能；高老师请求只允许创建属于可见 shared 范围的任务或查询自己有权访问的状态。
+
+## 4.1 责任与渐进式自主权
+
+`tasks.assignee_id` 是业务结果的 accountable owner；`task_responsibilities.current_executor_id` 是当前下一步执行者。两者不能合并：人可以仍对结果负责，而 Agent 已获授权执行日常步骤。
+
+工作类别（例如 data retrieval、document drafting、routine follow-up、external communication、financial action、legal submission）由 workspace 的版本化 DelegationProfile 管理。每个 profile 定义最高等级、允许动作、可逆动作、强制审批条件、成功标准、证据要求、升级策略和 promotion gate。TaskResponsibility 可以进一步缩小 profile 的范围，不允许扩大。策略更新创建新版本，旧事件保留原 policy version。
+
+| Level | 语义 | 人的参与 |
+|---|---|---|
+| 0 human_executes | Agent 只解释/建议 | 人实际执行 |
+| 1 agent_prepares | Agent 准备草稿、数据和步骤 | 人审查并提交 |
+| 2 agent_supervised | Agent 执行允许的可逆内部步骤 | 人在关键/不可逆提交前审查 |
+| 3 agent_bounded | Agent 在任务级动作白名单内执行 | 触发审批条件时介入 |
+| 4 agent_exception_only | Agent 在工作类别批准范围内处理常规工作 | 人处理例外、目标和策略变更 |
+
+普通人类工作进入 `human_action_requests`（输入、决策、审查、实际执行、异常处理）；对 Host 挂起工具调用的许可仍使用 `approval_requests`。两者的 UI 可以汇总到一个 Human Inbox，但领域对象和权限语义必须分开。
+
+升级只基于 verified runs、交付验收、返工率、策略违规及来源证据。默认升级需人批准；仅当 owner 对某个 work class 显式开启 `auto_promotion_enabled` 时，系统才能在既定 max level 内自动升级。模型信心、语义记忆或 Agent 自己的声明不能改变授权。人可立即接管、降级、暂停和撤销；Host 每次调用/续跑仍重新验证工具权限。
+
+## 5. 入站处理与“完成”定义
 
 ## 5. 入站处理与“完成”定义
 

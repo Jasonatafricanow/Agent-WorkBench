@@ -33,6 +33,26 @@
 | A27 | P1 | 外部用户在群里提私人项目名称 | 不返回“是否存在”之类侧漏信息 |
 | A28 | P1 | Agent 说“延迟可能因为工作太忙” | 标记为模型推测，不写成延期事实 |
 
+## Progressive Delegation / Human-in-the-Loop gates (P0)
+
+| ID | 操作与故障场景 | 预期结果 |
+|---|---|---|
+| A29 | owner 对 routine reporting 批准 level 2，对 external communication 只批准 level 1 | 同一 Agent 在不同 work class 得到不同权限，不存在全局自主分数 |
+| A30 | Agent 尝试执行不在 task allowlist 的动作 | WorkBench 路由到人工决策/拒绝；Host 仍独立执行工具授权 |
+| A31 | task level 高于 active profile ceiling 或 task 扩大 profile action set | 服务端拒绝，不能通过 LLM 参数绕过 |
+| A32 | level 2 执行不可逆外发或触发 mandatory approval condition | 先产生 HumanActionRequest/approval；不能先执行后补批 |
+| A33 | promotion 只有模型信心或成功次数，没有验收证据 | 不升级；要求 verified evidence |
+| A34 | 达到 evidence gate，但 profile 未开启自动升级 | 仅提出升级建议，等待 owner 明确批准 |
+| A35 | profile 明确预授权 auto promotion，证据完整且未超上限 | 可以在 profile ceiling 内升级，并写责任事件；不新增 action 权限 |
+| A36 | owner 撤权/接管后，旧 Run 恢复或新事件派发 | WorkBench 与 Host 当前策略复核，旧授权不得复用 |
+| A37 | owner 离线，两个独立任务可自动完成，一个任务需要 owner 决策 | 两个独立任务继续；人工依赖进入持久 inbox，不阻塞无关任务 |
+| A38 | owner 通过 Telegram 回答 HumanActionRequest | 认证回复形成新业务事件，更新请求并重新评估责任/下一步 |
+| A39 | Agent A 将任务交给 Agent B | current executor 变更有版本、来源和事件；Host Run/session 不复制进 WorkBench |
+| A40 | 人工完成/批准与 Host deferred tool approval 混淆 | 普通人工行动与工具审批保持不同对象及不同权限语义 |
+| A41 | responsibility event 被 UPDATE/DELETE | SQL 拒绝，历史追加式保留 |
+
+## 推荐自动化测试层
+
 ## 推荐自动化测试层
 
 - Unit：领域规则、状态机、日期解析、证据优先级、权限矩阵。

@@ -16,6 +16,14 @@
 
 设计推导：静态任务列表不足以解释演变；纯语义记忆不能保证事务、期限与权限；持续运行 LLM 容易浪费资源且无法取代可靠状态机。因此采用**SQL 业务事件权威 + 事件唤醒 + 现有 Agent Host 执行 + 可选认知/记忆上下文**。
 
+## 0.1 核心产品原则：人类参与循环，系统不依赖人类持续在线
+
+WorkBench 是持续运行的工作系统，不是等用户发任务的 Copilot，也不是要求人每天维护的看板。人类的目标、反馈、纠错、审批、接管和授权变更都是普通的工作事件；在已授权范围内，Agent 必须能够独立继续推进。只有真正依赖人的任务才进入 Human Action Inbox；这些事项等待期间，其他互不依赖的工作继续运行。
+
+系统的长期目标是 **Progressive Delegation / Responsibility Transfer**：将重复、可验证的工作逐步从“人执行”转移到“Agent 准备—人确认—Agent 受监督执行—限定自主执行—人只处理例外”。自主权按工作类别和具体动作授予，不存在一个全局 Agent 信任分数。每次执行都需要可验证证据；默认由 owner 批准升级，只有 owner 明确预授权的版本化策略才允许在既定上限内自动升级。人类始终可立即接管、降级、暂停或撤销。
+
+这套原则由 [ADR-0003](ADR-0003-PROGRESSIVE-DELEGATION.md) 定义，属于 WorkBench 核心领域，不是未来可选的 UI 功能。
+
 ## 1. 整体架构
 
 ```mermaid
@@ -197,6 +205,27 @@ source accepted → wake.pending → wake.leased → completed / deferred / fail
 - “审批记录为 approved”不是无条件恢复以前挂起的工具调用。
 - “CI 通过”不是端到端接入或长期稳定性已验证。
 - 正式业务功能不先做需求验证型 MVP；**但工程上线必须通过可靠性和权限验收**。
+
+## 9.1 责任转移与人类参与闭环（核心领域）
+
+任务状态、注意力、责任分配、自主等级和 Agent Run 是不同维度。WorkBench SQL 保存当前任务与责任契约；Agent Host 保存执行现场；MR 提供认知理解和注意力建议；MR-Mem 提供可追溯语义经验。人类通过 `human_action_requests` 参与输入、决策、审查和实际执行，不再被当成每次 Run 的启动开关。
+
+责任对象由四部分构成：
+
+1. **Accountability**：现有 `tasks.assignee_id` 是对结果负责的业务责任人。
+2. **Current executor**：`task_responsibilities.current_executor_id` 是下一步实际执行者，可以是人或 Agent。
+3. **Delegation envelope**：工作类别、当前等级、动作 allowlist、可逆动作、必须审批条件、成功标准、证据要求、升级策略及 profile 版本。
+4. **Responsibility history**：`responsibility_events` 记录委派、接管、升级、降级、覆盖和撤权的原因及证据。
+
+五个等级：0 人执行；1 Agent 准备、人执行/提交；2 Agent 执行可逆内部步骤、人审查关键提交；3 Agent 在任务级白名单内自主执行；4 Agent 在工作类别批准范围内处理常规事项，人只处理例外。等级 4 仍受动作白名单、审批条件、Host Tool Policy 和人工撤权约束。
+
+**人不在线时的行为**：能在当前授权范围内独立完成的工作继续；等待外部条件的任务保留依赖和 Timer；必须由人提供输入/判断/审查/实际操作的事项写入 Human Action Inbox，按 batch/notify/interrupt 策略通知；不依赖该人类事项的其他任务不能被连带阻塞。人回复后成为新的认证事件，回到同一工作循环。
+
+升级自主等级不能只看模型信心或成功次数。必须核验交付验收、返工率、来源证据和策略违规；默认由 owner 批准。自动升级只有在 owner 对具体工作类别、指标门槛和最高等级显式预授权时才允许。任何 human override / revoke 立即阻止后续派发；Host 在每次工具执行和恢复时仍独立检查权限。
+
+四个新增 SQL 对象：`delegation_profiles`（按工作类别版本化的批准策略）、`task_responsibilities`（任务当前执行者与有效权限）、`responsibility_events`（追加式审计历史）、`human_action_requests`（普通人工输入/决策/审查/执行）。`approval_requests` 仍只代表 Host 挂起工具调用的具体审批，不与普通人工任务混用。
+
+
 
 ## 10. 跨仓库设计入口
 

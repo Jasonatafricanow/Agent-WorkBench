@@ -46,6 +46,21 @@ WorkBench 不得假设当前 Hermes/其他宿主具有：
 
 在 Host 能力盘点前，只能提交协议与离线 ledger，不打开自动派发或外部自动催促。
 
+## 4.1 Responsibility / Human Participation contract
+
+| Contract | Owner | Consumer | Boundary |
+|---|---|---|---|
+| DelegationProfile + TaskResponsibility | WorkBench SQL | Existing Host | Versioned work-class ceiling and task-level narrower envelope; not a Host tool token |
+| HumanActionRequest | WorkBench SQL | Human via Telegram/dashboard; Host after response | Human input/decision/review/execution is a durable business action |
+| ApprovalRequest | WorkBench SQL | Existing Host | Specific deferred tool call only; Host resumes and rechecks permission |
+| ResponsibilityEvent | WorkBench SQL | Agents, audit and incremental summary | Append-only delegation/takeover/promotion/demotion evidence |
+| Cognitive recommendation | Mind Runtime | Existing Host / WorkBench policy service | Advisory only; cannot change delegation or authorize tools |
+| Semantic preference/experience | MR-Mem | Mind Runtime / Host | Context only; cannot promote autonomy or grant a permission |
+
+Human responses are authenticated input events. The WorkBench service evaluates the current responsibility contract; the Host separately validates actual tool capability. Human absence does not stop authorized independent work.
+
+## 5. 跨仓验收条件
+
 ## 5. 跨仓验收条件
 
 - WorkBench event 重复投递不会得到两次现实执行；未知状态等待 Host reconcile；

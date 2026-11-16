@@ -38,6 +38,17 @@ always be consuming tokens.
    Run state wins for execution-status questions. Native evidence wins when
    evaluating what an external participant actually said.
 
+## Human participation and responsibility
+
+WorkBench's always-on loop includes the human as a first-class actor, but
+human presence is not a prerequisite for every cycle. WorkBench owns the
+accountable owner, current executor, work class, versioned delegation profile,
+task-level autonomy envelope, human action queue and delegation history. The
+Agent Host still owns Runs, Sessions, tool authorization and side effects. MR
+may provide cognition or recommend attention; MR-Mem may provide
+evidence-backed context. Neither may promote autonomy or grant permissions.
+See [ADR-0003 — Progressive Delegation](ADR-0003-PROGRESSIVE-DELEGATION.md).
+
 ## Paths
 
 ```text

@@ -1,10 +1,10 @@
 # Agent WorkBench — 独立的多 Agent 工作台
 
-**首先阅读：[总体蓝图、设计推导与整体框架](docs/PROJECT_BLUEPRINT.md)**（为什么这样分工、数据流、状态机、模块依赖、故障与分阶段实施）。对应的跨仓边界见 [协作协议矩阵](docs/CROSS_REPO_INTERFACE_MATRIX.md)。
+**首先阅读：[责任转移与人类参与核心设计 ADR-0003](docs/ADR-0003-PROGRESSIVE-DELEGATION.md)**，然后阅读 [总体蓝图、设计推导与整体框架](docs/PROJECT_BLUEPRINT.md)（为什么这样分工、数据流、状态机、模块依赖、故障与分阶段实施）。对应的跨仓边界见 [协作协议矩阵](docs/CROSS_REPO_INTERFACE_MATRIX.md)。
 
 **GitHub 开发状态：正式架构与模块接口已建立；生产接线未完成。**
 
-工作台独立于 MR-Mem：SQL 记录项目、任务、执行历史、延期原因、等待对象与提醒；MR-Mem 提供经宿主授权的用户语义上下文，不能替代 SQL 当前任务状态。Telegram 接收需求和进度，Agent 通过固定工具门面操作，Dashboard 只读。
+工作台是持续运转的个人工作系统：人类是工作循环中的一等参与者，但不是系统持续推进的前置条件；已授权工作在用户离线时继续，需人工判断的事项进入持久 Human Action Inbox。Progressive Delegation 允许按工作类别和证据逐步转移执行责任。SQL 记录项目、任务、执行历史、责任分配、授权范围、延期原因、等待对象与提醒；MR-Mem 提供经宿主授权的用户语义上下文，不能替代 SQL 当前任务状态。Telegram 接收需求和进度，Agent 通过固定工具门面操作，Dashboard 只读。
 
 ## 分支与仓库
 
@@ -12,6 +12,12 @@
 - MR-Mem 对接分支：`feat/workbench-user-context-20261116`
 - Draft PR：#1（此仓库）；MR-Mem #22
 - `main` 目前为初始化基线，勿将开发分支误认为已上线
+
+## 新增核心架构（2026-11-17）
+
+- [ADR-0003 — Progressive Delegation](docs/ADR-0003-PROGRESSIVE-DELEGATION.md)：五级自主权、按工作类别授权、证据门槛、人工接管与撤权。
+- `delegation_profiles` / `task_responsibilities` / `responsibility_events` / `human_action_requests`：责任转移和人类参与的 SQL 事实源。
+- `src/workdesk/delegation.py`：纯策略路由与升级评估；不代替 Host 工具授权。
 
 ## 当前已提交
 

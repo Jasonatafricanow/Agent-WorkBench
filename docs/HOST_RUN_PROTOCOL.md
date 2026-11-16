@@ -62,6 +62,23 @@ evaluates effective tool permissions at the moment of execution or resume.
 An approval answer comes back as a **new authenticated wake event**, never
 by invoking a stored tool call directly from Telegram.
 
+## Human action vs. deferred tool approval
+
+WorkBench's `human_action_requests` is a durable queue for a person to supply
+information, make a business decision, review a deliverable or perform a
+real-world action. It is **not** the same as `approval_requests`, which
+records a specific Host-deferred tool call. A human reply becomes a new
+authenticated business event; it does not directly resume a saved tool call.
+The Host receives the event and rechecks current tool permissions itself.
+
+The task's responsible executor and autonomy level are WorkBench-owned,
+versioned business policy. A Host Run is merely one execution attempt under
+that policy. Human absence leaves human-dependent requests pending, while
+other independently authorized events continue to dispatch. See
+[ADR-0003](ADR-0003-PROGRESSIVE-DELEGATION.md).
+
+## Linkage and observability
+
 ## Linkage and observability
 
 For every business task change, append `task_events` plus a durable outbox

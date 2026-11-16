@@ -21,6 +21,18 @@
 
 **Gate**：离线测试通过：并发冲突、同消息重放、多操作事务回滚、事件及 outbox 原子提交、恢复后任务状态不丢失、等待→催促→解阻→恢复流程完整。
 
+## Phase 1.5 — Responsibility Transfer / Human-in-the-Loop（核心，不可后置）
+
+- 将 `delegation_profiles`、`task_responsibilities`、`responsibility_events`、`human_action_requests` 纳入正式迁移和领域服务；区分业务 accountable owner 与当前 executor。
+- 实现五级自主权路由、按 work class 的版本化上限、任务级只能收窄的动作 envelope、审批条件、成功标准、证据要求与升级策略。
+- 将普通人工输入/决策/审查/实际执行建成持久 Human Action Inbox；保留 `approval_requests` 专门表达 Host deferred tool call 的具体审批。
+- 实现 owner override/revoke/takeover、责任变更审计、策略版本快照；默认升级由人批准。只有 owner 对特定 work class 显式预授权时才允许 evidence-gated auto-promotion。
+- 设计 human absence policy：已授权工作继续；人工依赖事项保持 pending 并按 batch/notify/interrupt 提醒；无关任务不被阻塞；不允许假设人已同意。
+
+**Gate**：0–4 级动作路由；任务权限不超 profile；mandatory approval 永远拦截；证据不足/违规阻止升级；撤权后下次 dispatch/resume 失败关闭；人离线时独立任务继续；人工回复重新进入事件循环。
+
+## Phase 2 — 统一服务接口与鉴权
+
 ## Phase 2 — 统一服务接口与鉴权
 
 - 在受信环境中部署单写服务（推荐 FastAPI + Pydantic 作网络层，领域核心不绑定框架），HTTP `/v1/read`, `/v1/apply`, `/v1/overview`；Schema 严格校验，不允许任意 SQL 字符串。
