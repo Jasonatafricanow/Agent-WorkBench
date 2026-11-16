@@ -69,6 +69,16 @@ class ResponsibilitySchemaTests(unittest.TestCase):
                      'agent_bounded','owner',?)""", (NOW,),
             )
 
+    def test_task_responsibility_pins_exact_profile_version(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.c.execute(
+                """INSERT INTO task_responsibilities(
+                     workspace_id,task_id,current_executor_id,profile_id,work_class,
+                     autonomy_level,profile_version,updated_by_principal_id,updated_at
+                   ) VALUES('a','task-a','agent','profile-a','routine_reporting',
+                     'agent_bounded',2,'owner',?)""", (NOW,),
+            )
+
     def test_only_one_active_profile_per_work_class(self):
         with self.assertRaises(sqlite3.IntegrityError):
             self.c.execute(
