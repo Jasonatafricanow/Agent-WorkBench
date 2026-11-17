@@ -23,6 +23,8 @@
 | WorkBench→MR-Mem | 授权/源版本校验通过的候选语义 + SourceRef | canonical memory ID/admission receipt | 编译延迟可重试；不阻塞 SQL |
 | MR→Host | 认知上下文、倾向、WakeSignal | Host 选择采纳/忽略的操作反馈 | 不提升为工具执行权限 |
 | Host→WorkBench | Run 状态与来源引用 | WorkBench 中的引用记录 | Run completed 不自动 task DONE |
+| WorkBench 看板→Facetide | `GET /api/summary/v1`（服务 token） | `facetide.summary.v1` | 只读、仅 owner；Facetide 停机显示缓存，不影响其他视图 |
+| LiteMonitor→WorkBench | `GET /status/v1`（独立只读 token） | `workbench.status.v1` | 只读；不发唤醒、不选 Agent；见 SYSTEM_COMPONENT_BOUNDARIES.md |
 
 接口由拥有者独立版本化。模型自然语言只产生**待验证提案**；授权、官方 due、发消息和工具调用由受信服务执行。
 

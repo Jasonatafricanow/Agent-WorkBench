@@ -135,7 +135,8 @@ def main(argv=None) -> int:
                            dashboard_token=os.environ.get("WORKBENCH_DASHBOARD_TOKEN"),
                            dashboard_workspace=os.environ.get("WORKBENCH_DASHBOARD_WORKSPACE"),
                            dashboard_principal=os.environ.get("WORKBENCH_DASHBOARD_PRINCIPAL"),
-                           life_adapter=LifeStateAdapter.from_env(a.db))
+                           life_adapter=LifeStateAdapter.from_env(a.db),
+                           status_token=os.environ.get("WORKBENCH_STATUS_TOKEN"))
         serve(app, host=a.host, port=a.port)
     return 0
 
