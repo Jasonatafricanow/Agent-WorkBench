@@ -63,11 +63,28 @@ function record(entry) {
 const sessions = new Map(); // chatKey -> { session, manager }
 const lanes = new Map();    // chatKey -> promise (one Run at a time per chat)
 
+// Chat modes set by /new and /incognito. "incognito": the session lives only in memory (no transcript
+// file), nothing is written to long-term memory, and the message text is not kept in the Host's
+// recovery files once handled. Kept on disk so a restart does not silently leave incognito.
+// "fresh": the next message starts a new session instead of continuing the most recent one.
+const MODES_FILE = path.join(WORK_DIR, 'chat-modes.json');
+const modes = new Map(Object.entries((() => { try { return JSON.parse(fs.readFileSync(MODES_FILE, 'utf8')); } catch { return {}; } })()));
+function setMode(chatKey, mode) {
+  if (mode) modes.set(chatKey, mode); else modes.delete(chatKey);
+  fs.writeFileSync(MODES_FILE, JSON.stringify(Object.fromEntries(modes)));
+}
+const incognito = chatKey => modes.get(chatKey) === 'incognito';
+
 async function sessionFor(chatKey, sessionFile) {
   if (!sessionFile && sessions.has(chatKey)) return sessions.get(chatKey);
   const cwd = path.join(WORK_DIR, 'chats', chatKey);
   fs.mkdirSync(cwd, { recursive: true });
-  const manager = sessionFile && fs.existsSync(sessionFile) ? SessionManager.open(sessionFile) : SessionManager.continueRecent(cwd);
+  const mode = modes.get(chatKey);
+  const manager = sessionFile && fs.existsSync(sessionFile) ? SessionManager.open(sessionFile)
+    : mode === 'incognito' ? SessionManager.inMemory(cwd)
+    : mode === 'fresh' ? SessionManager.create(cwd)
+    : SessionManager.continueRecent(cwd);
+  if (mode === 'fresh') setMode(chatKey, null);
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: AGENT_DIR });
   await resourceLoader.reload();
   const { session } = await createAgentSession({ cwd, model, modelRuntime: runtime, sessionManager: manager,
@@ -91,7 +108,7 @@ async function runTurn({ chatKey, chatId, identity, wakeEventId, taskId, sourceR
   const sessionId = manager.getSessionId();
   const file = manager.getSessionFile?.() || sessionFile || '';
   const turn = { identity, wakeEventId, extraWakeIds, taskId, sourceRef, sessionFile: file, agentIdentity,
-    sessionId, sourceText: text, role };
+    sessionId, sourceText: text, role, incognito: incognito(chatKey) };
   setTurn(sessionId, turn);
   for (const id of [wakeEventId, ...extraWakeIds]) {
     record({ event_id: id, status: 'running', chat_key: chatKey, chat_id: chatId, session_file: file, identity, role });
@@ -126,7 +143,8 @@ async function runTurn({ chatKey, chatId, identity, wakeEventId, taskId, sourceR
   const outcome = { status: 'completed', run_ref: `${sessionId}:${wakeEventId}`, session_ref: file };
   const ids = [wakeEventId, ...extraWakeIds];
   if (reply && deliver) {
-    record({ event_id: wakeEventId, status: 'reply_pending', reply, chat_id: chatId, extra_ids: extraWakeIds,
+    // An incognito reply is not written to disk: a crash before it went out loses it rather than keeping it.
+    record({ event_id: wakeEventId, status: 'reply_pending', reply: turn.incognito ? undefined : reply, chat_id: chatId, extra_ids: extraWakeIds,
       task_id: taskId, recipient_id: recipientId, outcome });
     delivering.add(wakeEventId); // the periodic re-send must not race the first attempt
     try { await deliver(reply); } catch (error) {
@@ -168,6 +186,21 @@ async function sendLong(chatId, text) {
 }
 
 // ---------------------------------------------------------------- inbound
+// /new: the next message starts a new session. /incognito: a session kept only in memory, nothing
+// remembered; /new leaves it. Only people bound to the workbench can switch their own chat.
+bot.command(['new', 'incognito'], async ctx => {
+  const chatKey = `tg-${ctx.chat.id}-${ctx.from.id}`;
+  const goIncognito = ctx.message.text.startsWith('/incognito');
+  await inLane(chatKey, async () => { // never while a Run of this chat is still going
+    sessions.delete(chatKey);
+    setMode(chatKey, goIncognito ? 'incognito' : 'fresh');
+  });
+  await ctx.reply(goIncognito
+    ? '已进入无痕会话：对话不存档、不写入记忆。任务的改动照常记在工作台。发 /new 退出。'
+    : '已开始新会话。');
+  bot.turnDone?.(chatKey);
+});
+
 bot.command(['approve', 'deny'], async ctx => {
   const approvalId = (ctx.match || '').trim();
   const identity = { provider: 'telegram', bot_id: BOT_ID, external_user_id: String(ctx.from.id) };
@@ -229,6 +262,7 @@ async function flush(chatKey, { ctx, items }) {
       if (item.label.startsWith('消息')) await wb('/v1/intake/finish', { inbox_id: item.intake.inbox_id, ok }).catch(() => {});
       if (item.updateId) spool({ update_id: item.updateId, done: true });
     }
+    if (incognito(chatKey)) compactSpool(); // the text of handled incognito messages leaves the disk now
     bot.turnDone?.(chatKey); // CLI transport waits on this instead of on the first outgoing message
   });
 }
@@ -259,13 +293,25 @@ async function handleText(ctx, { replay = false } = {}) {
 }
 bot.on('message:text', ctx => handleText(ctx));
 
-async function replaySpool() {
-  if (!fs.existsSync(SPOOL)) return;
+// Messages whose Run has not finished yet; the spool is rewritten to hold only those.
+function openSpool() {
   const open = new Map();
+  if (!fs.existsSync(SPOOL)) return open;
   for (const line of fs.readFileSync(SPOOL, 'utf8').split('\n').filter(Boolean)) {
     try { const e = JSON.parse(line); if (e.done) open.delete(e.update_id); else open.set(e.update_id, e); } catch {}
   }
-  for (const e of open.values()) {
+  return open;
+}
+function compactSpool() {
+  const open = openSpool();
+  const temp = SPOOL + '.tmp';
+  fs.writeFileSync(temp, [...open.values()].map(e => JSON.stringify(e) + '\n').join(''));
+  fs.renameSync(temp, SPOOL);
+  return open;
+}
+
+async function replaySpool() {
+  for (const e of compactSpool().values()) {
     const chat = { id: e.chat_id };
     await handleText({ chat, from: { id: e.from_id }, update: { update_id: e.update_id },
       message: { message_id: e.message_id, text: e.text },

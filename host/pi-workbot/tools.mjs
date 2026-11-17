@@ -136,6 +136,8 @@ export function createWorkbenchTools(sessionManager) {
       parameters: Type.Object({ summary: Type.String({ minLength: 1, maxLength: 800 }), source_ref: Type.Optional(Type.String()) }),
       execute: async (toolCallId, { summary, source_ref }) => {
         const current = turn();
+        // An incognito chat (/incognito) leaves nothing in long-term memory, whatever the model decides.
+        if (current.incognito) return out({ skipped: true, message: 'incognito chat: nothing from it is written to memory' });
         // MR-Mem's source contract: the note points at the original Pi session (session_id, so the
         // compile layer and /forget can find it) and at the exact source text (sha256 fingerprint).
         const sessionId = String(current.sessionId || 'unknown').replace(/[^\w-]/g, '-').slice(0, 80);
