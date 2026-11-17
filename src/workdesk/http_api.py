@@ -39,7 +39,8 @@ from .task_service import SqliteTaskService
 class WorkbenchApp:
     def __init__(self, database: str | Path, *, host_token: str, dashboard_token: str | None = None,
                  dashboard_workspace: str | None = None, dashboard_principal: str | None = None,
-                 clock: Callable[[], str] = utc_now, life_adapter=None, status_token: str | None = None):
+                 clock: Callable[[], str] = utc_now, life_adapter=None, status_token: str | None = None,
+                 owner_token: str | None = None, companion_token: str | None = None, companion_bot_id: str = "xiyue"):
         if not host_token or len(host_token) < 16:
             raise ValueError("WORKBENCH_HOST_TOKEN must be set (16+ chars)")
         self.db = str(database)
@@ -51,6 +52,15 @@ class WorkbenchApp:
         # Read-only token for workbench.status.v1 (desktop indicator); too short counts as not configured.
         self.status_token = status_token if status_token and len(status_token) >= 24 else None
         self.host_seen_at: float | None = None  # wall time of the Host's last authenticated call
+        # The owner in person (DEV_LOG rule 9): the owner token signs in to the dashboard with write forms.
+        # Same workspace and principal as the dashboard, actor source "owner" (direct, no chat in between).
+        self.owner_token = owner_token if owner_token and len(owner_token) >= 16 else None
+        self.owner_actor = (ActorContext(dashboard_workspace, dashboard_principal, "owner", "owner")
+                            if self.owner_token and dashboard_workspace and dashboard_principal else None)
+        # A companion agent of the owner (Xiyue): task tools and inbound recording only, under its own bot id,
+        # never the Host's wake/approval/delivery routes, and it does not count as the work bot being online.
+        self.companion_token = companion_token if companion_token and len(companion_token) >= 24 else None
+        self.companion_bot_id = companion_bot_id
         self.tasks = SqliteTaskService(self.db, clock=clock)
         self.identities = SqlIdentityProvider(self.db)
         self.approvals = ApprovalService(self.db, clock=clock)
@@ -199,14 +209,41 @@ class WorkbenchApp:
         from .status import build_status
         return build_status(self.tasks, self.dashboard_actor, generated_at=self.clock(), host_seen_at=self.host_seen_at)
 
-    def check_dashboard(self, header: str | None) -> bool:
+    def check_dashboard(self, header: str | None) -> str | None:
+        """'owner' (owner token: write forms), 'viewer' (dashboard password: read-only) or None."""
         if not self.dashboard_actor or not header or not header.startswith("Basic "):
-            return False
+            return None
         try:
             _, _, password = base64.b64decode(header[6:]).decode("utf-8").partition(":")
         except Exception:  # noqa: BLE001
+            return None
+        if self.owner_actor and hmac.compare_digest(password, self.owner_token):
+            return "owner"
+        return "viewer" if hmac.compare_digest(password, self.dashboard_token) else None
+
+    COMPANION_ROUTES = frozenset({"/v1/tools/list_tasks", "/v1/tools/get_task", "/v1/tools/change_tasks",
+                                  "/v1/tools/whats_new", "/v1/intake/inbound", "/v1/intake/finish"})
+
+    def check_companion(self, header: str | None, path: str, body: dict) -> bool:
+        """The companion token only reaches its routes, and only as its own bot (identity or inbound bot_id)."""
+        if not self.companion_token or not header or path not in self.COMPANION_ROUTES:
             return False
-        return hmac.compare_digest(password, self.dashboard_token)
+        if not hmac.compare_digest(header, f"Bearer {self.companion_token}"):
+            return False
+        bot = (body.get("identity") or {}).get("bot_id") if path.startswith("/v1/tools/") else body.get("bot_id")
+        return path == "/v1/intake/finish" or bot == self.companion_bot_id
+
+    def owner_form(self, form: dict) -> str:
+        """Run one owner form; returns the success message (raises WorkbenchError on refusal)."""
+        from contextlib import closing
+        from zoneinfo import ZoneInfo
+        from .owner_ui import operations
+        from .storage import connect
+        with closing(connect(self.db)) as conn:
+            row = conn.execute("SELECT timezone FROM workspaces WHERE id=?", (self.owner_actor.workspace_id,)).fetchone()
+        ops, message = operations(form, ZoneInfo(row["timezone"] if row else "Asia/Shanghai"))
+        self.tasks.apply(actor=self.owner_actor, idempotency_key=f"owner-web:{form.get('nonce', '')}", operations=ops)
+        return message
 
 
 def _event_dict(event):
@@ -220,8 +257,10 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
     """host_api=False: the LAN listener — dashboard pages and /status/v1 only, no POST at all, so the
     Host API (the only write path) never leaves loopback."""
     from urllib.parse import parse_qs
+    from urllib.parse import quote, urlparse
     from .dashboard import (render_calendar, render_dashboard, render_life, render_projects, render_task,
                             render_timeline)
+    from .owner_ui import csrf_value, new_task_form, notice, task_panel
     pages = {"/calendar", "/timeline", "/projects", "/life"}
 
     class Handler(BaseHTTPRequestHandler):
@@ -247,7 +286,8 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
             route, _, query = self.path.partition("?")
             if route not in ("/", "/dashboard", *pages) and not route.startswith("/task/"):
                 return self._send(404, {"code": "NOT_FOUND"})
-            if not app.check_dashboard(self.headers.get("Authorization")):
+            who = app.check_dashboard(self.headers.get("Authorization"))
+            if not who:
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="WorkBench"')
                 self.end_headers()
@@ -256,9 +296,13 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
             q = {k: v[0] for k, v in parse_qs(query).items() if v and v[0]}
             actor, now = app.dashboard_actor, app.clock()
             narrow = {"project": q.get("project"), "requester": q.get("requester")}
+            owner = who == "owner"
+            csrf = csrf_value(app.owner_token) if owner else ""
             try:
                 if route.startswith("/task/"):
-                    page = render_task(app.tasks, actor, app.db, route[len("/task/"):], now)
+                    page = render_task(app.tasks, actor, app.db, route[len("/task/"):], now,
+                                       owner_panel=(lambda t, slot, tz: task_panel(csrf, t, slot, tz)) if owner else None,
+                                       notice=notice(q) if owner else "")
                 elif route == "/calendar":
                     page = render_calendar(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"), **narrow)
                 elif route == "/timeline":
@@ -268,15 +312,48 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
                 elif route == "/life":
                     page = render_life(actor, app.db, now, app.life)
                 else:
-                    page = render_dashboard(app.tasks, actor, app.db, now)
+                    page = render_dashboard(app.tasks, actor, app.db, now,
+                                            owner_html=(notice(q) + new_task_form(csrf)) if owner else "")
             except WorkbenchError as exc:
                 return self._send(404 if exc.code in ("NOT_FOUND", "FORBIDDEN") else 400, {"code": exc.code})
             self._send(200, page.encode("utf-8"), "text/html")
 
+        def _owner_post(self):
+            """POST /owner/ops: one owner form, then back to the page it came from (303) with a notice."""
+            if app.check_dashboard(self.headers.get("Authorization")) != "owner":
+                return self._send(401 if not app.owner_actor else 403, {"code": "UNAUTHORIZED"})
+            origin = self.headers.get("Origin")
+            if origin and origin != "null" and urlparse(origin).netloc != self.headers.get("Host"):
+                return self._send(403, {"code": "CROSS_ORIGIN"})
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 20_000:
+                return self._send(413, {"code": "TOO_LARGE"})
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode("utf-8")).items() if v}
+            if not hmac.compare_digest(form.get("csrf", ""), csrf_value(app.owner_token)):
+                return self._send(403, {"code": "CSRF"})
+            back = form.get("back", "/")
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/"
+            try:
+                result = "ok=" + quote(app.owner_form(form))
+            except WorkbenchError as exc:
+                result = "err=" + quote(str(exc)[:300])
+            except (ValueError, TypeError, KeyError) as exc:
+                result = "err=" + quote(str(exc)[:200])
+            self.send_response(303)
+            self.send_header("Location", f"{back.split('?')[0]}?{result}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def do_POST(self):
+            if self.path.split("?")[0] == "/owner/ops":
+                return self._owner_post()
             if not host_api:
                 return self._send(405, {"code": "METHOD_NOT_ALLOWED"})
-            if not app.check_host(self.headers.get("Authorization")):
+            auth = self.headers.get("Authorization")
+            host = app.check_host(auth)
+            # Nothing is read from a caller holding neither token; a companion is checked against the body below.
+            if not host and not (app.companion_token and auth and hmac.compare_digest(auth, f"Bearer {app.companion_token}")):
                 return self._send(401, {"code": "UNAUTHORIZED"})
             try:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -285,6 +362,8 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
                 body = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(body, dict):
                     raise InvalidOperation("body must be a JSON object")
+                if not host and not app.check_companion(auth, self.path, body):
+                    return self._send(403, {"code": "FORBIDDEN"})
                 return self._send(200, {"ok": True, "result": app.handle(self.path, body)})
             except LookupError:
                 return self._send(404, {"code": "NOT_FOUND"})

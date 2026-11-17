@@ -535,10 +535,11 @@ class _Batch:
         """Closing, reopening, moving an official due or changing delegation needs evidence that exists.
         Through a chat Host the source_ref must resolve: explicit_user -> a message a team member (or this
         task's requester) really sent; verified_tool -> a record the system itself confirmed for this task
-        (a carrier-confirmed delivery, a matched watch or an accepted deliverable). The trusted CLI is exempt."""
+        (a carrier-confirmed delivery, a matched watch or an accepted deliverable). The trusted CLI and the
+        owner acting directly (the owner's web console) are exempt: the act itself is the owner's word."""
         if evidence not in STRONG_EVIDENCE or not op.get("source_ref") or not _text(op.get("reason"), "reason"):
             raise EvidenceRequired(f"{what} needs explicit_user/verified_tool evidence, source_ref and reason")
-        if self.actor.source == "cli":
+        if self.direct:
             return
         ref = op["source_ref"]
         if evidence == "explicit_user":
@@ -566,9 +567,9 @@ class _Batch:
     def cites_message(self, op: dict, what: str, *, sender: str | None = None, any_human: bool = False,
                       ref_field: str = "source_ref") -> str | None:
         """A human decision made through a chat Host must point at an inbox message that person really
-        sent; otherwise the model could invent "the owner said yes". The trusted CLI is exempt.
-        Returns the sender principal of the cited message."""
-        if self.actor.source == "cli":
+        sent; otherwise the model could invent "the owner said yes". The trusted CLI and the owner acting
+        directly are exempt. Returns the sender principal of the cited message."""
+        if self.direct:
             return sender
         ref = op.get(ref_field)
         row = ref and self.c.execute(
@@ -580,6 +581,13 @@ class _Batch:
         if not ok:
             raise EvidenceRequired(f"{what} must cite a message that person actually sent ({ref_field})")
         return row["sender_principal_id"]
+
+    @property
+    def direct(self) -> bool:
+        """No chat in between: the trusted CLI, or the owner in person on the web console (actor source
+        "owner", only ever built by the server for the configured owner principal, and only honoured for
+        a principal whose role really is owner)."""
+        return self.actor.source == "cli" or (self.actor.source == "owner" and self.role == "owner")
 
     def role_of(self, principal_id: str) -> str | None:
         row = self.c.execute("SELECT role FROM memberships WHERE workspace_id=? AND principal_id=? AND active=1",

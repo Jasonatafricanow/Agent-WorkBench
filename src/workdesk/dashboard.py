@@ -1,7 +1,8 @@
-"""Server-rendered read-only dashboard: Work, Calendar, Timeline, Projects, Life.
+"""Server-rendered dashboard: Work, Calendar, Timeline, Projects, Life.
 
-No scripts and no write paths: every page is a GET, filters are plain GET forms, and nothing here
-calls a write operation. Business data comes through TaskService / `views` (workspace + role checked);
+No scripts. Signed in with the read-only dashboard password every page is a GET and nothing here writes.
+Signed in with the owner token, the Work and Task pages also carry the owner's forms (owner_ui.py), which
+post to /owner/ops; rendering itself still never writes. Business data comes through TaskService / `views` (workspace + role checked);
 the Life view reads Facetide through `LifeStateAdapter` and is shown to the workspace owner only.
 """
 from __future__ import annotations
@@ -17,6 +18,7 @@ from . import views
 from .errors import Forbidden
 from .insights import schedule_load, stagnation
 from .storage import connect
+from .owner_ui import FORM_CSS
 from .task_service import SqliteTaskService
 
 CSS = """
@@ -112,13 +114,13 @@ def _list(items, render, empty="（无）") -> str:
     return "<ul>" + "".join(f"<li>{render(i)}</li>" for i in items) + "</ul>"
 
 
-def _page(title: str, active: str, body: str, now: str, tz: ZoneInfo, *, sub: str = "") -> str:
+def _page(title: str, active: str, body: str, now: str, tz: ZoneInfo, *, sub: str = "", owner: bool = False) -> str:
     tabs = "".join(f"<a href='{href}' class='{'on' if key == active else ''}'>{label}</a>" for key, href, label in NAV)
     stamp = _local(now, tz, "%Y-%m-%d %H:%M")
     return (f"<!doctype html><html lang=zh-CN><head><meta charset=utf-8>"
             f"<meta name=viewport content='width=device-width,initial-scale=1'><title>{e(title)}</title>"
-            f"<style>{CSS}</style></head><body><main><h1>{e(title)}</h1>"
-            f"<div class=sub>只读视图 · {stamp}{' · ' + sub if sub else ''}</div><nav>{tabs}</nav>{body}</main></body></html>")
+            f"<style>{CSS}{FORM_CSS if owner else ''}</style></head><body><main><h1>{e(title)}</h1>"
+            f"<div class=sub>{'主人模式' if owner else '只读视图'} · {stamp}{' · ' + sub if sub else ''}</div><nav>{tabs}</nav>{body}</main></body></html>")
 
 
 def _pills(base: str, current: str, options, extra: dict) -> str:
@@ -158,7 +160,7 @@ def _event_line(ev, tz, names) -> str:
 
 
 # ----------------------------------------------------------------------------------- Work
-def render_dashboard(tasks, actor, database: str, now: str) -> str:
+def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str = "") -> str:
     tz, names = _ctx(actor, database)
     ov = tasks.overview(actor=actor, limit=30)
     since = (datetime.fromisoformat(now[:-1]) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -215,9 +217,9 @@ def render_dashboard(tasks, actor, database: str, now: str) -> str:
                                          empty="没有")),
     ]
     focus = "".join(focus_slot(n, ov["focus"].get(n)) for n in ("NOW", "NEXT1", "NEXT2"))
-    body = f"<div class=focus>{focus}</div><div class=grid>" + "".join(
+    body = f"{owner_html}<div class=focus>{focus}</div><div class=grid>" + "".join(
         f"<section><h2>{title}</h2>{content}</section>" for title, content in sections) + "</div>"
-    return _page("工作台", "work", body, now, tz)
+    return _page("工作台", "work", body, now, tz, owner=bool(owner_html))
 
 
 # ------------------------------------------------------------------------------- Calendar
@@ -365,10 +367,17 @@ def render_life(actor, database: str, now: str, adapter) -> str:
 
 
 # ----------------------------------------------------------------------------------- Task
-def render_task(tasks, actor, database: str, task_id: str, now: str) -> str:
+def render_task(tasks, actor, database: str, task_id: str, now: str, *, owner_panel=None, notice: str = "") -> str:
+    """owner_panel(task, focus_slot, tz) -> HTML of the owner's forms, or None for the read-only page."""
     tz, names = _ctx(actor, database)
     view = tasks.read(actor=actor, task_id=task_id)
     t = view["task"]
+    panel = ""
+    if owner_panel is not None:
+        with closing(connect(database)) as conn:
+            row = conn.execute("SELECT slot FROM task_focus WHERE workspace_id=? AND task_id=?",
+                               (actor.workspace_id, t["id"])).fetchone()
+        panel = owner_panel(dict(t), row["slot"] if row else None, tz)
     facts = [("状态", STATE_LABELS.get(t["state"], t["state"])), ("下一步", t["next_action"]), ("目标", t["goal"]),
              ("官方截止", t.get("official_due_local") or _local(t["official_due_at"], tz)),
              ("soft due", _local(t["soft_due_at"], tz)), ("已做", t["done_summary"]),
@@ -383,6 +392,6 @@ def render_task(tasks, actor, database: str, task_id: str, now: str) -> str:
     chk = view.get("latest_checkpoint")
     checkpoint = (f"{e(chk['next_action'])}<div class=meta>已完成 {e(', '.join(json.loads(chk['completed_steps_json'])))}"
                   f" · 未核实 {e(', '.join(json.loads(chk['unverified_json'])))}</div>") if chk else '<p class="empty">（无）</p>'
-    body = (f"<div class=grid><section><h2>概况</h2><ul>{rows}</ul></section><section><h2>在等</h2>{deps}</section>"
+    body = (f"{notice}{panel}<div class=grid><section><h2>概况</h2><ul>{rows}</ul></section><section><h2>在等</h2>{deps}</section>"
             f"<section><h2>工作书签</h2>{checkpoint}</section><section><h2>历史</h2>{events}</section></div>")
-    return _page(t["title"], "work", body, now, tz)
+    return _page(t["title"], "work", body, now, tz, owner=owner_panel is not None)

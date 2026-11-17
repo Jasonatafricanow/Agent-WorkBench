@@ -136,7 +136,10 @@ def main(argv=None) -> int:
                            dashboard_workspace=os.environ.get("WORKBENCH_DASHBOARD_WORKSPACE"),
                            dashboard_principal=os.environ.get("WORKBENCH_DASHBOARD_PRINCIPAL"),
                            life_adapter=LifeStateAdapter.from_env(a.db),
-                           status_token=os.environ.get("WORKBENCH_STATUS_TOKEN"))
+                           status_token=os.environ.get("WORKBENCH_STATUS_TOKEN"),
+                           owner_token=os.environ.get("WORKBENCH_OWNER_TOKEN"),
+                           companion_token=os.environ.get("WORKBENCH_COMPANION_TOKEN"),
+                           companion_bot_id=os.environ.get("WORKBENCH_COMPANION_BOT_ID", "xiyue"))
         serve(app, host=a.host, port=a.port)
     return 0
 
