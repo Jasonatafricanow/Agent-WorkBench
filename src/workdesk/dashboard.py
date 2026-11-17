@@ -97,7 +97,7 @@ def render_dashboard(tasks, actor, database: str, now: str) -> str:
         ("停滞与反复延期", _list(stuck, lambda s: f"{e(s['title'])}<div class=meta>延期 {len(s['delays'])} 次"
                                                 f"{' · 等待自 ' + _local(s['waiting_since'], tz) if s['waiting_since'] else ''}</div>")),
         ("排期过载的日子", _list([d for d in load["days"] if d["overloaded"]],
-                              lambda d: f"{e(d['date'])}<div class=meta>{len(d['items'])} 项到期</div>", empty="没有")),
+                              lambda d: f"{e(d['date'])}<div class=meta>工作量 {d['load']} 项</div>", empty="没有")),
         ("排期建议（只动 soft due）", _list(load.get("suggestions", []),
                                     lambda s: f"<a href='/task/{e(s['task_id'])}'>{e(s['title'])}</a>"
                                               f"<div class=meta>{e(s['from'])} → {e(s['to'])} · {e(s['basis'])}</div>",
