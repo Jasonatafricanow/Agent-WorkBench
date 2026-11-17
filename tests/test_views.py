@@ -66,6 +66,16 @@ class CalendarAndIsolation(ViewFixture):
             views.projects(self.db, actor=ActorContext("ws", "gao", "owner", "dashboard"))
 
 
+class PlannedStarts(ViewFixture):
+    def test_planned_start_is_a_calendar_item_for_members_only(self):
+        t = self.task("plan", requester_id="gao", planned_start_at="2026-11-20T07:00:00Z")
+        week = dict(start="2026-11-17T00:00:00Z", end="2026-11-24T00:00:00Z")
+        owner = {(i["task_id"], i["type"]) for i in views.calendar(self.db, actor=self.owner, **week)["items"]}
+        self.assertIn((t, "planned"), owner)
+        gao = {(i["task_id"], i["type"]) for i in views.calendar(self.db, actor=self.gao, **week)["items"]}
+        self.assertNotIn((t, "planned"), gao)  # an internal plan, not an outward date
+
+
 class TimelineFilters(ViewFixture):
     def test_date_window_is_exact(self):
         self.clock.now = "2026-11-18T03:00:00Z"

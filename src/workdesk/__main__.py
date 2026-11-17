@@ -129,11 +129,13 @@ def main(argv=None) -> int:
         print(json.dumps(fire_due(a.db, now=utc_now()), ensure_ascii=False))
     elif a.cmd == "serve":
         from .http_api import WorkbenchApp, serve
+        from .life import LifeStateAdapter
         migrate(a.db)
         app = WorkbenchApp(a.db, host_token=os.environ.get("WORKBENCH_HOST_TOKEN", ""),
                            dashboard_token=os.environ.get("WORKBENCH_DASHBOARD_TOKEN"),
                            dashboard_workspace=os.environ.get("WORKBENCH_DASHBOARD_WORKSPACE"),
-                           dashboard_principal=os.environ.get("WORKBENCH_DASHBOARD_PRINCIPAL"))
+                           dashboard_principal=os.environ.get("WORKBENCH_DASHBOARD_PRINCIPAL"),
+                           life_adapter=LifeStateAdapter.from_env(a.db))
         serve(app, host=a.host, port=a.port)
     return 0
 

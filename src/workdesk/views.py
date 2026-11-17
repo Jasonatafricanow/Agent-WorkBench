@@ -66,7 +66,8 @@ def _day(ts: str, tz: ZoneInfo) -> str:
 
 def calendar(database: str | Path, *, actor: ActorContext, start: str, end: str,
              project_id: str | None = None, requester_id: str | None = None) -> dict:
-    """Official dues, soft dues, follow-ups and human requests in [start, end), each its own item."""
+    """Official dues, soft dues, planned starts, follow-ups and human requests in [start, end), each its
+    own item. Requesters only get their own requests' official dues and the human requests addressed to them."""
     start, end = _window(start, end)
     conn, role, tz = _open(database, actor)
     with closing(conn):
@@ -74,13 +75,18 @@ def calendar(database: str | Path, *, actor: ActorContext, start: str, end: str,
         ws, member = actor.workspace_id, role in READ_ALL_ROLES
         items = []
         for r in conn.execute(
-                f"""SELECT t.id, t.title, t.state, t.official_due_at, t.official_due_local, t.soft_due_at FROM tasks t
+                f"""SELECT t.id, t.title, t.state, t.official_due_at, t.official_due_local, t.soft_due_at,
+                           t.planned_start_at FROM tasks t
                     WHERE t.workspace_id=? AND t.state NOT IN ('DONE','CANCELLED') {where}
-                    AND (t.official_due_at >= ? AND t.official_due_at < ? OR t.soft_due_at >= ? AND t.soft_due_at < ?)""",
-                (ws, *args, start, end, start, end)):
+                    AND (t.official_due_at >= ? AND t.official_due_at < ? OR t.soft_due_at >= ? AND t.soft_due_at < ?
+                         OR t.planned_start_at >= ? AND t.planned_start_at < ?)""",
+                (ws, *args, start, end, start, end, start, end)):
             if r["official_due_at"] and start <= r["official_due_at"] < end:
                 items.append({"type": "official_due", "at": r["official_due_at"], "local_date": r["official_due_local"]
                               or _day(r["official_due_at"], tz), "task_id": r["id"], "title": r["title"], "state": r["state"]})
+            if member and r["planned_start_at"] and start <= r["planned_start_at"] < end:
+                items.append({"type": "planned", "at": r["planned_start_at"], "local_date": _day(r["planned_start_at"], tz),
+                              "task_id": r["id"], "title": r["title"], "state": r["state"]})
             if member and r["soft_due_at"] and start <= r["soft_due_at"] < end:
                 items.append({"type": "soft_due", "at": r["soft_due_at"], "local_date": _day(r["soft_due_at"], tz),
                               "task_id": r["id"], "title": r["title"], "state": r["state"]})
