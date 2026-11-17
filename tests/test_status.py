@@ -110,3 +110,24 @@ class LiteMonitorPluginContract(StatusFixture):
         self.assertEqual(out["host"], ("离线", "2"))
         self.assertTrue(out["summary"][0].startswith("无焦点"))
         self.assertIn(out["summary"][1], ("0", "1", "2"))
+
+
+class LanListener(StatusFixture):
+    """WORKBENCH_LAN_BIND serves the read-only dashboard and status to other devices, never the Host API."""
+
+    def test_pages_and_status_readable_but_no_post_even_with_the_host_token(self):
+        import base64
+        self.app = WorkbenchApp(self.db, host_token=HOST, dashboard_token="d" * 20, dashboard_workspace="ws",
+                                dashboard_principal="owner", clock=self.clock, status_token=STATUS)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app, host_api=False))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.base = f"http://127.0.0.1:{server.server_port}"
+        auth = "Basic " + base64.b64encode(b"owner:" + b"d" * 20).decode()
+        with urllib.request.urlopen(urllib.request.Request(self.base + "/calendar", headers={"Authorization": auth})) as r:
+            self.assertEqual(r.status, 200)
+        self.assertEqual(self.call("/status/v1")[0], 200)
+        body = json.dumps({"workspace_id": "ws"}).encode()
+        self.assertEqual(self.call("/v1/wake/claim", token=HOST, method="POST", data=body)[0], 405)
+        self.assertIsNone(self.app.host_seen_at)  # a refused LAN call is not a Host heartbeat

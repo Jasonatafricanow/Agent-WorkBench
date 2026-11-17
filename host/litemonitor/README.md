@@ -8,7 +8,8 @@
 
 ```
 WORKBENCH_STATUS_TOKEN=<随机生成，至少 24 个字符>
-WORKBENCH_STATUS_BIND=0.0.0.0:8791      # 只开放 GET /status/v1；不需要跨机器时用 127.0.0.1:8791
+WORKBENCH_LAN_BIND=0.0.0.0:8791         # 局域网只读：看板 + /status/v1，不含 Host API
+# 或 WORKBENCH_STATUS_BIND=0.0.0.0:8791  # 只开放 /status/v1
 WORKBENCH_DASHBOARD_WORKSPACE=work       # 状态按这个 workspace 的 owner 视角统计
 WORKBENCH_DASHBOARD_PRINCIPAL=owner
 ```

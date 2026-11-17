@@ -52,7 +52,8 @@ LiteMonitor 的插件是声明式 JSON：定时请求一个 HTTP 地址、按 JS
   - `level`：总体颜色 = max(Host 状态, 有逾期/结果不明/待审批时为 1)；
   - `line`：任务栏一行，例如 `季度报告… · 审批1 · 逾期1`。
 - 鉴权：独立的 `WORKBENCH_STATUS_TOKEN`（≥24 字符）。Host token（能写）和看板密码（能看全部，含生活视图）都不能用来读它，它也不能调用任何写接口。
-- 网络：`WORKBENCH_STATUS_BIND=0.0.0.0:8791` 会另开一个**只服务 `GET /status/v1`** 的监听；主服务（Host API、看板）仍只在回环地址上。
+- 网络（多设备）：`WORKBENCH_LAN_BIND=0.0.0.0:8791` 另开一个局域网监听，只提供**只读看板 + `GET /status/v1`**，任何 POST 都返回 405；Host API（唯一的写入口）始终只在回环地址 `127.0.0.1:8790`。只需要状态时可改用 `WORKBENCH_STATUS_BIND`（仅 `/status/v1`）。
+- 局域网上是明文 HTTP：看板密码和状态 token 在家庭局域网内可被嗅探。出门在外用 Tailscale 地址（加密），不要把这个端口映射到公网。
 - "监控进程"的落点就是 Host 在线状态：指示灯只负责让你看到 Host 掉线；重启、换 Agent 仍是 Host 的事。
 
 ## 5. 异常处理

@@ -79,7 +79,8 @@ WorkBench 管工作，MR-Mem 管记忆，Agent Host 管 Agent 的运行，Mind R
 | 11-17 | `729fb1b` | WB-LIFE-01 P0：官方/Soft 双期限分开、工作量每任务只算一次 |
 | 11-17 | `bf0a533` | P2：日历/时间线/项目池只读查询（按 workspace 与角色） |
 | 11-17 | `9521ad6` | P1/P3：五视图看板；生活视图经 Facetide 只读接口（facetide-mcp `1d1cc99`） |
-| 11-17 | 本次 | LiteMonitor 适配：`/status/v1`、独立只读监听、插件；系统边界文档；本开发日志 |
+| 11-17 | `1d3a42d` | LiteMonitor 适配：`/status/v1`、独立只读监听、插件；系统边界文档；本开发日志 |
+| 11-17 | 本次 | 局域网只读监听 `WORKBENCH_LAN_BIND`（看板 + 状态，无 POST）；会话管理前端的设计讨论（见第九节） |
 
 PR：Agent-WorkBench#1（框架，草稿）← #2（WB-LIFE-01，叠在 #1 上）← 本分支；facetide-mcp#8。
 
@@ -120,7 +121,7 @@ PR：Agent-WorkBench#1（框架，草稿）← #2（WB-LIFE-01，叠在 #1 上�
 按优先级：
 
 1. **真实 Telegram 上线前**：建专用工作 bot（token 只放环境文件）；先只开入站和建单，对外发送保持审批；对照源消息、事件、outbox 核一遍。
-2. **部署到 NAS**：WorkBench + 工作 bot 容器化（`deploy/` 已有样例）；Facetide 目前只接受本机访问，要么同机部署，要么设计受限暴露；LiteMonitor 走 `WORKBENCH_STATUS_BIND`。
+2. **部署到 NAS**：WorkBench + 工作 bot 容器化（`deploy/` 已有样例）；Facetide 目前只接受本机访问，要么同机部署，要么设计受限暴露。多设备访问已就绪：`WORKBENCH_LAN_BIND` 提供只读看板与状态（已从 NAS 经局域网和 Tailscale 实测可达，未带 token 返回 401）。
 3. **MR-Mem 编译层接入**：消费 `memory_outbox`；工作记忆便条进入 SB/Thread 编译，而不是只当检索文本。
 4. **消息附件与删除**：附件存原文引用、可回查；消息撤回时标记来源失效（不删事件）。
 5. **在装 LiteMonitor 的电脑上实际加载插件**，确认显示与颜色。
@@ -164,3 +165,29 @@ PR：Agent-WorkBench#1（框架，草稿）← #2（WB-LIFE-01，叠在 #1 上�
 - 自动化测试：`PYTHONPATH=src python -m unittest discover -s tests`（当前 147 项）；CI 跑 `contracts`。
 - 真模型实测：`.local/run-cli.sh <脚本>`，不连 Telegram，走同一条网关代码；每轮对照 `wb.sqlite` 核对模型的说法。
 - 审计：三轮独立审计（两轮子代理、一轮 Codex），所有发现都有对应修复和回归测试。
+
+## 九、待定设计：会话管理前端（2026-11-17 提出，未实现）
+
+**需求**（用户原话整理）：多设备，希望有自己的前端交互页面；现在通过 Telegram 管理 session、删改记录很不方便；有些 session 的交互不想写进记忆，用完就想直接删掉。
+
+**归属判断**：session 是 Agent Host 的执行记录（Pi 会话文件、宿主账本），不是 WorkBench 的业务事实。所以这是 **Host 控制台**，不放进 WorkBench 只读看板。看板保持零写入。
+
+**建议的设计**：
+
+1. **无痕会话（事前）**：开一个会话时可以选"不记忆"。这个会话里：
+   - Agent 的 `work_memory_write` 直接拒绝；
+   - 溪月那边的 `<memory>` 抽取和 Statebar `observe` 也跳过；
+   - 业务动作（建任务、改进度）照常进 WorkBench，因为那是工作事实，不是记忆。
+2. **删除会话（事后）**：一次操作按顺序级联删除：
+   - 先预览会影响什么：MR-Mem `/forget` 带 `dry_run`，按 `session_id` 列出会删的记忆；同时列出这个会话关联的 WorkBench 任务和事件；
+   - 确认后删 Pi 会话文件，删宿主账本里的会话指针，调 MR-Mem `/forget`；
+   - WorkBench 里由这个会话产生的任务和事件**不删**（只追加的业务历史），只标注"来源会话已删除"；要撤销某件事，单独取消那个任务。
+3. **一个会话一件事**：工作 bot 现在是同一个聊天一直续用同一个会话（`continueRecent`）。按会话删记忆就会连带删掉整个聊天的历史。需要加"新会话"操作（控制台按钮或 `/new`），让会话粒度变小，删除才有意义。
+4. **编辑记录**：Pi 会话是追加式日志，改中间的一条会破坏后续上下文。建议只支持"从某一条之后分叉或截断"，以及整段删除，不做逐条改写。
+5. **前端与安全**：这是有写操作的页面，和只读看板分开：
+   - 单独的管理口令；
+   - 防 CSRF 的请求令牌，并检查 Origin；
+   - 只监听局域网和 Tailscale，不映射公网。
+   - 可以复用 Facetide 本地 Web 的做法（页面令牌 + Origin 检查 + 严格 CSP）。
+
+**待用户决定**：先管哪个 Host 的会话（溪月 `xiyue-pi` 在 NAS 上，工作 bot 在本仓库），以及控制台放在哪里：每个 Host 各挂一个，还是抽一个共用的小模块给两个 Pi 网关一起用。

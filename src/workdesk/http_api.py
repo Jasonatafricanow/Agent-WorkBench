@@ -216,7 +216,9 @@ def _event_dict(event):
                                            "source_ref", "created_at", "task_id")}
 
 
-def make_handler(app: WorkbenchApp):
+def make_handler(app: WorkbenchApp, *, host_api: bool = True):
+    """host_api=False: the LAN listener — dashboard pages and /status/v1 only, no POST at all, so the
+    Host API (the only write path) never leaves loopback."""
     from urllib.parse import parse_qs
     from .dashboard import (render_calendar, render_dashboard, render_life, render_projects, render_task,
                             render_timeline)
@@ -272,6 +274,8 @@ def make_handler(app: WorkbenchApp):
             self._send(200, page.encode("utf-8"), "text/html")
 
         def do_POST(self):
+            if not host_api:
+                return self._send(405, {"code": "METHOD_NOT_ALLOWED"})
             if not app.check_host(self.headers.get("Authorization")):
                 return self._send(401, {"code": "UNAUTHORIZED"})
             try:
@@ -367,6 +371,13 @@ def serve(app: WorkbenchApp, *, host: str = "127.0.0.1", port: int = 8790, timer
     threading.Thread(target=timers, daemon=True).start()
     # Optional second listener with only GET /status/v1, e.g. WORKBENCH_STATUS_BIND=0.0.0.0:8791, so a
     # desktop indicator on another machine can read it while everything else stays on loopback.
+    # LAN listener for other devices (phone, other PCs): read-only dashboard + /status/v1, no Host API.
+    lan_bind = os.environ.get("WORKBENCH_LAN_BIND")
+    if lan_bind:
+        l_host, _, l_port = lan_bind.rpartition(":")
+        lan_server = ThreadingHTTPServer((l_host or "0.0.0.0", int(l_port)), make_handler(app, host_api=False))
+        threading.Thread(target=lan_server.serve_forever, daemon=True).start()
+        print(f"WorkBench LAN (read-only dashboard + status) listening on {l_host}:{l_port}", flush=True)
     status_bind = os.environ.get("WORKBENCH_STATUS_BIND")
     if status_bind and app.status_token:
         s_host, _, s_port = status_bind.rpartition(":")
