@@ -81,7 +81,7 @@ class WorkbenchApp:
                                                                     mark_seen=bool(body.get("mark_seen", True))),
             "/v1/evaluate_action": lambda: self.tasks.evaluate_action(
                 actor=self.actor(body), task_id=body.get("task_id"), action=body.get("action"),
-                triggered_conditions=body.get("triggered_conditions") or []),
+                triggered_conditions=body.get("triggered_conditions") or [], recipient_id=body.get("recipient_id")),
             "/v1/insights/stagnation": lambda: stagnation(self.db, actor=self.actor(body), now=now),
             "/v1/insights/schedule_load": lambda: schedule_load(self.db, actor=self.actor(body), now=now),
             "/v1/wake/claim": lambda: self._claim(ws, int(body.get("lease_seconds", 600))),
@@ -93,7 +93,7 @@ class WorkbenchApp:
                 host_deferred_ref=body["host_deferred_ref"], expires_at=body["expires_at"],
                 task_id=body.get("task_id"), approver_id=None),
             "/v1/approvals/decide": lambda: self.approvals.decide(
-                approver=self.actor(body), approval_id=body["approval_id"], approve=bool(body.get("approve")),
+                approver=self.actor(body), approval_id=body["approval_id"], approve=body.get("approve"),
                 source_ref=body.get("source_ref", "")),
             "/v1/approvals/consume": lambda: self.approvals.consume(
                 workspace_id=ws, tool_name=body["tool_name"], tool_input=body.get("tool_input"),

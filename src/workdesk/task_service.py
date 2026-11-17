@@ -360,9 +360,18 @@ class SqliteTaskService:
                     "counts": by_kind, "events": events}
 
     def evaluate_action(self, *, actor: ActorContext, task_id: str, action: str,
-                        triggered_conditions: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
-        """Host-side routing check for a proposed business action (not a tool grant)."""
+                        triggered_conditions: list[str] | tuple[str, ...] = (),
+                        recipient_id: str | None = None) -> dict[str, Any]:
+        """Host-side routing check for a proposed business action (not a tool grant).
+        Conditions the Host reports can only add to what WorkBench derives itself: "new_recipient" is
+        decided here from delivery history, never from the model's own flag."""
+        triggered_conditions = list(triggered_conditions)
         with read_snapshot(self._database) as conn:
+            if recipient_id is not None and not conn.execute(
+                    """SELECT 1 FROM delivery_outbox WHERE workspace_id=? AND recipient_principal_id=?
+                       AND status='sent' AND provider_message_id IS NOT NULL""",
+                    (actor.workspace_id, recipient_id)).fetchone():
+                triggered_conditions.append("new_recipient")
             role = self._role(conn, actor)
             if role == "requester":
                 raise Forbidden("requesters cannot evaluate delegated actions")
@@ -519,9 +528,31 @@ class _Batch:
              op.get("source_ref"), occurred, self.now))
         return event_id
 
-    def strong(self, op: dict, evidence: str, what: str) -> None:
+    def strong(self, op: dict, evidence: str, what: str, task: Any = None) -> None:
+        """Closing, reopening, moving an official due or changing delegation needs evidence that exists.
+        Through a chat Host the source_ref must resolve: explicit_user -> a message a team member (or this
+        task's requester) really sent; verified_tool -> a record the system itself confirmed for this task
+        (a carrier-confirmed delivery, a matched watch or an accepted deliverable). The trusted CLI is exempt."""
         if evidence not in STRONG_EVIDENCE or not op.get("source_ref") or not _text(op.get("reason"), "reason"):
             raise EvidenceRequired(f"{what} needs explicit_user/verified_tool evidence, source_ref and reason")
+        if self.actor.source == "cli":
+            return
+        ref = op["source_ref"]
+        if evidence == "explicit_user":
+            sender = self.cites_message(op, what, any_human=True)
+            if self.role_of(sender) not in ("owner", "editor") and not (task is not None and sender == task["requester_id"]):
+                raise EvidenceRequired(f"{what} must cite a message from a team member or this task's requester")
+            return
+        task_id = task["id"] if task is not None else None
+        found = task_id is not None and self.c.execute(
+            """SELECT 1 FROM delivery_outbox WHERE workspace_id=? AND id=? AND task_id=? AND status='sent'
+                 AND provider_message_id IS NOT NULL
+               UNION ALL SELECT 1 FROM external_watches WHERE workspace_id=? AND id=? AND task_id=? AND status='matched'
+               UNION ALL SELECT 1 FROM deliverables WHERE workspace_id=? AND id=? AND task_id=? AND status='ACCEPTED'""",
+            (self.ws, ref, task_id) * 3).fetchone()
+        if not found:
+            raise EvidenceRequired(f"{what}: verified_tool source_ref must be this task's confirmed delivery, "
+                                   "matched watch or accepted deliverable")
 
     def owner_only(self, what: str, op: dict | None = None) -> None:
         if self.role != "owner":
@@ -648,7 +679,7 @@ class _Batch:
         if not after:
             return {"task_id": task["id"], "changed": False}
         if "official_due_at" in after and task["official_due_at"] is not None:
-            self.strong(op, evidence, "changing an existing official due")
+            self.strong(op, evidence, "changing an existing official due", task)
         delayed = [k for k in DUE_FIELDS if k in after and task[k] is not None
                    and (after[k] is None or after[k] > task[k])]
         if delayed:
@@ -678,7 +709,7 @@ class _Batch:
         # A date-only deadline counts as due at the end of that local day, never at local midnight.
         due_at = _local_to_utc(local + "T23:59:59" if precision == "date" else local, tz_name)
         if task["official_due_at"] is not None and due_at != task["official_due_at"]:
-            self.strong(op, evidence, "changing an existing official due")
+            self.strong(op, evidence, "changing an existing official due", task)
             if due_at > task["official_due_at"] and op.get("delay_kind") not in DELAY_KINDS:
                 raise InvalidOperation("moving a due date later needs delay_kind and reason",
                                        field="delay_kind", allowed=sorted(DELAY_KINDS))
@@ -819,9 +850,9 @@ class _Batch:
             if evidence != "verified_tool" or not op.get("receipt_ref"):
                 raise EvidenceRequired("SUBMITTED needs a verified delivery receipt (receipt_ref)")
             if self.actor.source != "cli" and not self.c.execute(
-                    """SELECT 1 FROM delivery_outbox WHERE workspace_id=? AND id=? AND status='sent'
-                       AND provider_message_id IS NOT NULL""", (self.ws, op["receipt_ref"])).fetchone():
-                raise EvidenceRequired("receipt_ref must be a delivery the carrier confirmed as sent")
+                    """SELECT 1 FROM delivery_outbox WHERE workspace_id=? AND id=? AND task_id=? AND status='sent'
+                       AND provider_message_id IS NOT NULL""", (self.ws, op["receipt_ref"], task["id"])).fetchone():
+                raise EvidenceRequired("receipt_ref must be a delivery of this task the carrier confirmed as sent")
             sets.update(submit_receipt_ref=op["receipt_ref"], submitted_at=self.now,
                         revision=row["revision"] + (1 if row["status"] in ("REVIEW_REQUIRED", "REJECTED") else 0),
                         artifact_ref=op.get("artifact_ref") or row["artifact_ref"])
@@ -829,7 +860,24 @@ class _Batch:
             if evidence not in STRONG_EVIDENCE or not op.get("source_ref"):
                 raise EvidenceRequired(f"{status} needs the recipient's own message as source_ref")
             # Outcomes count as promotion evidence, so they must come from a real person's message.
-            self.cites_message(op, f"marking a deliverable {status}", any_human=True)
+            sender = self.cites_message(op, f"marking a deliverable {status}", any_human=True)
+            if self.actor.source != "cli":
+                # The verdict must come from whoever the work is for (the requester, else the team), and be
+                # said after the work was submitted: an unrelated or earlier message proves nothing.
+                allowed = {task["requester_id"]} - {None} | {
+                    r["promisee_id"] for r in self.c.execute(
+                        "SELECT promisee_id FROM commitments WHERE workspace_id=? AND task_id=?", (self.ws, task["id"]))}
+                allowed = allowed or {
+                    r["principal_id"] for r in self.c.execute(
+                        "SELECT principal_id FROM memberships WHERE workspace_id=? AND active=1 AND role IN ('owner','editor')",
+                        (self.ws,))}
+                said_at = self.c.execute(
+                    """SELECT MAX(COALESCE(i.edited_at, i.received_at)) FROM inbox_messages i WHERE i.workspace_id=?
+                       AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r WHERE r.inbox_id=i.id
+                            AND r.raw_source_ref=?))""", (self.ws, op["source_ref"], op["source_ref"])).fetchone()[0]
+                if sender not in allowed or not row["submitted_at"] or said_at < row["submitted_at"]:
+                    raise EvidenceRequired(f"marking a deliverable {status} needs a message from the person it was "
+                                           "delivered to, sent after it was submitted")
             if status == "ACKNOWLEDGED":
                 sets["acknowledged_at"] = self.now
             if status in ("ACCEPTED", "REJECTED", "REVIEW_REQUIRED"):
@@ -1007,7 +1055,7 @@ class _Batch:
         if target not in TRANSITIONS.get(current, ()):
             raise InvalidOperation(f"cannot move {current} -> {target}", field="to")
         if target in ("DONE", "CANCELLED") or current in ("DONE", "CANCELLED"):
-            self.strong(op, evidence, f"{current} -> {target}")
+            self.strong(op, evidence, f"{current} -> {target}", task)
         if target == "WAITING" and not self.c.execute(
                 "SELECT 1 FROM dependencies WHERE workspace_id=? AND task_id=? AND status='open'",
                 (self.ws, task["id"])).fetchone():
@@ -1268,13 +1316,17 @@ class _Batch:
             """UPDATE human_action_requests SET status=?, response_json=?, response_source_ref=?,
                  responded_at=?, updated_at=? WHERE id=?""",
             (status, _dumps(_obj(op.get("response"), "response")), op["source_ref"], self.now, self.now, request_id))
-        # The response re-enters the work loop as a durable wake event in the same transaction.
+        # The response re-enters the work loop as a durable wake event in the same transaction. Answered
+        # inside a live chat Run (a Host source), that Run already carries on: the event is recorded as
+        # handled inline instead of starting a second Run that would repeat the same follow-up.
+        inline = self.actor.source != "cli"
         wake_id = self.s._new_id("wake")
         self.c.execute(
-            """INSERT INTO wake_events(id,workspace_id,task_id,origin,origin_event_id,kind,source_ref,
-                 created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO wake_events(id,workspace_id,task_id,origin,origin_event_id,kind,source_ref,status,
+                 host_run_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (wake_id, self.ws, req["task_id"], "workbench.human_action", request_id,
-             "human_action_completed", op["source_ref"], self.now, self.now))
+             "human_action_completed", op["source_ref"], "completed" if inline else "pending",
+             "inline" if inline else None, self.now, self.now))
         result = {"human_action_id": request_id, "wake_event_id": wake_id, "status": status}
         if req["task_id"]:
             task = self.task(dict(op, task_id=req["task_id"]), check_version=False)

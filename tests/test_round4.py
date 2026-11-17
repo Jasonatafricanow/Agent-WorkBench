@@ -161,9 +161,9 @@ class SecondAudit(Base):
         did = self.apply(self.agent, "dl", {"op": "register_deliverable", "task_id": p, "expected_version": 2, "title": "R",
                                             "artifact_ref": "f", "evidence_type": "explicit_user"})[0]["deliverable_id"]
         self.apply(self.agent, "sb", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 3, "status": "SUBMITTED",
-                                      "evidence_type": "verified_tool", "receipt_ref": self.sent_delivery()})
+                                      "evidence_type": "verified_tool", "receipt_ref": self.sent_delivery(p)})
         self.apply(self.agent, "ac", {"op": "update_deliverable", "deliverable_id": did, "expected_version": 4, "status": "ACCEPTED",
-                                      "evidence_type": "explicit_user", "source_ref": self.inbox_from("gao")})
+                                      "evidence_type": "explicit_user", "source_ref": self.inbox_from("owner", 7)})
         self.assertEqual(review_delegations(self.db, now=NOW), [{"task_id": p, "promoted_to": "agent_supervised"}])
         self.assertTrue(any("自动升级" in json.loads(r[0]).get("text", "") for r in self.q("SELECT payload_json FROM delivery_outbox")))
         self.assertIn("responsibility_changed", [e["kind"] for e in self.svc.read(actor=self.owner, task_id=p)["events"]])

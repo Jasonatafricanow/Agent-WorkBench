@@ -60,8 +60,24 @@ def record_inbound(database: str | Path, *, workspace_id: str, platform: str, bo
             "SELECT id, status, sender_principal_id FROM inbox_messages WHERE platform=? AND bot_id=? AND update_id=?",
             (platform, bot_id, str(update_id))).fetchone()
         if dup is not None:
-            wake = conn.execute("SELECT id,status FROM wake_events WHERE workspace_id=? AND origin=? AND origin_event_id=?",
-                                (workspace_id, f"{platform}:{bot_id}", str(update_id))).fetchone()
+            wake = conn.execute(
+                "SELECT id,status,lease_until FROM wake_events WHERE workspace_id=? AND origin=? AND origin_event_id=?",
+                (workspace_id, f"{platform}:{bot_id}", str(update_id))).fetchone()
+            # A message whose Run died (failed, unknown, or a lease that ran out) is resumed on the same
+            # wake event when the Host re-submits it; a live or finished one stays a plain duplicate.
+            dead = wake is not None and (wake["status"] in ("failed", "unknown") or (
+                wake["status"] == "leased" and (wake["lease_until"] or "") <= now))
+            role = dup["sender_principal_id"] and conn.execute(
+                "SELECT role FROM memberships WHERE workspace_id=? AND principal_id=? AND active=1",
+                (workspace_id, dup["sender_principal_id"])).fetchone()
+            if handled_inline and dup["status"] in ("processing", "failed") and dead and role:
+                conn.execute("""UPDATE wake_events SET status='leased', attempts=attempts+1, lease_until=?,
+                                  host_run_ref='inline', updated_at=? WHERE id=?""",
+                             (_plus(now, lease_seconds), now, wake["id"]))
+                conn.execute("UPDATE inbox_messages SET status='processing', updated_at=? WHERE id=?", (now, dup["id"]))
+                return {"inbox_id": dup["id"], "accepted": True, "resumed": True, "wake_event_id": wake["id"],
+                        "actor": {"workspace_id": workspace_id, "principal_id": dup["sender_principal_id"],
+                                  "role": role["role"], "source": platform}}
             return {"inbox_id": dup["id"], "duplicate": True, "status": dup["status"],
                     "wake_event_id": wake["id"] if wake else None}
         sender = conn.execute(

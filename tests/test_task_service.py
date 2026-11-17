@@ -31,6 +31,10 @@ class Fixture(unittest.TestCase):
             c.execute("INSERT INTO workspaces(id,title,owner_id,timezone,created_at) VALUES('ws','Work','owner','Asia/Shanghai',?)", (NOW,))
             c.executemany("INSERT INTO memberships(workspace_id,principal_id,role) VALUES('ws',?,?)", [
                 ("owner", "owner"), ("gao", "requester"), ("agent", "editor"), ("agent2", "editor")])
+            # SRC is a message the owner really sent: strong evidence through a Host must resolve to one.
+            c.execute("""INSERT INTO inbox_messages(id,workspace_id,platform,bot_id,update_id,chat_id,message_id,
+                           sender_principal_id,raw_source_ref,received_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                      ("in-src", "ws", "telegram", "work-bot", "u-src", "chat-1", "msg-1", "owner", SRC, NOW, NOW))
         self.svc = SqliteTaskService(self.db, clock=lambda: NOW)
         # Trusted CLI source: owner-only ops then need no inbox message (see OwnerSourceTests).
         self.owner = ActorContext("ws", "owner", "owner", "cli")

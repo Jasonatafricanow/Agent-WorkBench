@@ -86,14 +86,15 @@ function inLane(chatKey, job) {
 }
 
 async function runTurn({ chatKey, chatId, identity, wakeEventId, taskId, sourceRef, text, sessionFile,
-                         extraWakeIds = [], inboxIds = [], role, agentIdentity = AGENT_IDENTITY }) {
+                         extraWakeIds = [], inboxIds = [], role, agentIdentity = AGENT_IDENTITY, deliver, recipientId }) {
   const { session, manager } = await sessionFor(chatKey, sessionFile);
   const sessionId = manager.getSessionId();
   const file = manager.getSessionFile?.() || sessionFile || '';
-  const turn = { identity, wakeEventId, extraWakeIds, taskId, sourceRef, sessionFile: file, agentIdentity };
+  const turn = { identity, wakeEventId, extraWakeIds, taskId, sourceRef, sessionFile: file, agentIdentity,
+    sessionId, sourceText: text, role };
   setTurn(sessionId, turn);
   for (const id of [wakeEventId, ...extraWakeIds]) {
-    record({ event_id: id, status: 'running', chat_key: chatKey, chat_id: chatId, session_file: file, identity });
+    record({ event_id: id, status: 'running', chat_key: chatKey, chat_id: chatId, session_file: file, identity, role });
   }
   const start = session.state.messages.length;
   try {
@@ -120,12 +121,37 @@ async function runTurn({ chatKey, chatId, identity, wakeEventId, taskId, sourceR
     await wb('/v1/tools/change_tasks', { identity, idempotency_key: `${wakeEventId}:links`, operations: ops.slice(0, 40) })
       .catch(error => console.error('link failed:', error.code || error.message));
   }
-  for (const id of [wakeEventId, ...extraWakeIds]) {
-    const outcome = { status: 'completed', run_ref: `${sessionId}:${wakeEventId}`, session_ref: file };
+  // The reply is recorded before it is sent and the Run is settled only after it went out: a crash in
+  // between leaves "reply_pending" in the ledger, which is re-sent instead of silently lost.
+  const outcome = { status: 'completed', run_ref: `${sessionId}:${wakeEventId}`, session_ref: file };
+  const ids = [wakeEventId, ...extraWakeIds];
+  if (reply && deliver) {
+    record({ event_id: wakeEventId, status: 'reply_pending', reply, chat_id: chatId, extra_ids: extraWakeIds,
+      task_id: taskId, recipient_id: recipientId, outcome });
+    try { await deliver(reply); } catch (error) {
+      console.error('reply not sent yet:', String(error?.message || error).slice(0, 200));
+      return reply; // retried by retryPendingReplies
+    }
+  }
+  for (const id of ids) {
     record({ event_id: id, ...outcome });
     await wb('/v1/wake/settle', { event_id: id, ...outcome }).catch(() => {});
   }
   return reply;
+}
+
+async function retryPendingReplies() {
+  for (const entry of [...ledger.values()].filter(e => e.status === 'reply_pending' && e.reply)) {
+    try {
+      if (entry.chat_id) await sendLong(entry.chat_id, entry.reply);
+      else await wb('/v1/delivery/enqueue', { recipient_id: entry.recipient_id || OWNER_PRINCIPAL, channel: 'telegram',
+        payload: { text: entry.reply }, dedupe_key: `wake:${entry.event_id}`, task_id: entry.task_id });
+    } catch { continue; }
+    for (const id of [entry.event_id, ...(entry.extra_ids || [])]) {
+      record({ event_id: id, ...entry.outcome });
+      await wb('/v1/wake/settle', { event_id: id, ...entry.outcome }).catch(() => {});
+    }
+  }
 }
 
 async function sendLong(chatId, text) {
@@ -141,10 +167,19 @@ async function sendLong(chatId, text) {
 bot.command(['approve', 'deny'], async ctx => {
   const approvalId = (ctx.match || '').trim();
   const identity = { provider: 'telegram', bot_id: BOT_ID, external_user_id: String(ctx.from.id) };
+  const sourceRef = `tg://${BOT_ID}/${ctx.chat.id}/${ctx.message.message_id}`;
   try {
+    // The command is itself an inbound message: record it first, so the decision cites a message the
+    // approver really sent (WorkBench refuses decisions whose source it cannot find).
+    const intake = await wb('/v1/intake/inbound', { platform: 'telegram', bot_id: BOT_ID,
+      update_id: String(ctx.update.update_id), chat_id: String(ctx.chat.id), message_id: String(ctx.message.message_id),
+      external_user_id: String(ctx.from.id), raw_source_ref: sourceRef, handled_inline: true });
+    if (intake.accepted && intake.wake_event_id) {
+      await wb('/v1/wake/settle', { event_id: intake.wake_event_id, status: 'completed', run_ref: 'approval-command' }).catch(() => {});
+      await wb('/v1/intake/finish', { inbox_id: intake.inbox_id, ok: true }).catch(() => {});
+    }
     const result = await wb('/v1/approvals/decide', { identity, approval_id: approvalId,
-      approve: ctx.message.text.startsWith('/approve'),
-      source_ref: `tg://${BOT_ID}/${ctx.chat.id}/${ctx.message.message_id}` });
+      approve: ctx.message.text.startsWith('/approve'), source_ref: sourceRef });
     await ctx.reply(`审批 ${approvalId}：${result.status}`);
   } catch (error) {
     await ctx.reply('审批没有记录：' + (error.code || error.message));
@@ -174,10 +209,10 @@ async function flush(chatKey, { ctx, items }) {
     const typing = setInterval(() => ctx.replyWithChatAction('typing').catch(() => {}), 4500);
     const ok = await (async () => {
       try {
-        const reply = await runTurn({ chatKey, chatId: ctx.chat.id, identity, wakeEventId: first.intake.wake_event_id, sourceRef: first.sourceRef,
+        await runTurn({ chatKey, chatId: ctx.chat.id, identity, wakeEventId: first.intake.wake_event_id, sourceRef: first.sourceRef,
           text, extraWakeIds: items.slice(1).map(i => i.intake.wake_event_id),
-          inboxIds: items.map(i => i.intake.inbox_id), role: first.intake.actor.role });
-        if (reply) await sendLong(ctx.chat.id, reply);
+          inboxIds: items.map(i => i.intake.inbox_id), role: first.intake.actor.role,
+          deliver: reply => sendLong(ctx.chat.id, reply) });
         return true;
       } catch (error) {
         console.error('turn failed:', String(error?.message || error).slice(0, 200));
@@ -187,26 +222,52 @@ async function flush(chatKey, { ctx, items }) {
     })();
     clearInterval(typing);
     for (const item of items) {
-      if (item.label === '消息') await wb('/v1/intake/finish', { inbox_id: item.intake.inbox_id, ok }).catch(() => {});
+      if (item.label.startsWith('消息')) await wb('/v1/intake/finish', { inbox_id: item.intake.inbox_id, ok }).catch(() => {});
+      if (item.updateId) spool({ update_id: item.updateId, done: true });
     }
     bot.turnDone?.(chatKey); // CLI transport waits on this instead of on the first outgoing message
   });
 }
 
-bot.on('message:text', async ctx => {
+// Host-side spool: the text of every inbound message is kept locally until its Run finished, so a
+// crash mid-Run is replayed on restart (Telegram will not redeliver an update the handler already took).
+const SPOOL = path.join(WORK_DIR, 'inbound.jsonl');
+function spool(entry) { fs.appendFileSync(SPOOL, JSON.stringify({ ...entry, at: new Date().toISOString() }) + '\n'); }
+
+async function handleText(ctx, { replay = false } = {}) {
+  const updateId = String(ctx.update.update_id);
+  if (!replay) spool({ update_id: updateId, chat_id: ctx.chat.id, from_id: ctx.from.id,
+    message_id: ctx.message.message_id, text: ctx.message.text });
   const sourceRef = `tg://${BOT_ID}/${ctx.chat.id}/${ctx.message.message_id}`;
   let intake;
   try {
-    intake = await wb('/v1/intake/inbound', { platform: 'telegram', bot_id: BOT_ID, update_id: String(ctx.update.update_id),
+    intake = await wb('/v1/intake/inbound', { platform: 'telegram', bot_id: BOT_ID, update_id: updateId,
       chat_id: String(ctx.chat.id), message_id: String(ctx.message.message_id), external_user_id: String(ctx.from.id),
       raw_source_ref: sourceRef, handled_inline: true });
   } catch (error) {
-    return ctx.reply('工作台暂时连不上，稍后再试。');
+    return replay ? undefined : ctx.reply('工作台暂时连不上，稍后再试。'); // stays in the spool for the next restart
   }
+  if (intake.duplicate || !intake.accepted) spool({ update_id: updateId, done: true });
   if (intake.duplicate) return;
   if (!intake.accepted) return ctx.reply('这个账号还没有接入工作台。');
-  queueForRun(`tg-${ctx.chat.id}-${ctx.from.id}`, ctx, { intake, sourceRef, label: '消息', text: ctx.message.text });
-});
+  const label = intake.resumed ? '消息（上次处理中断；先用 get_task / whats_new 核对已经写入的部分，不要重复写）' : '消息';
+  queueForRun(`tg-${ctx.chat.id}-${ctx.from.id}`, ctx, { intake, sourceRef, label, text: ctx.message.text, updateId });
+}
+bot.on('message:text', ctx => handleText(ctx));
+
+async function replaySpool() {
+  if (!fs.existsSync(SPOOL)) return;
+  const open = new Map();
+  for (const line of fs.readFileSync(SPOOL, 'utf8').split('\n').filter(Boolean)) {
+    try { const e = JSON.parse(line); if (e.done) open.delete(e.update_id); else open.set(e.update_id, e); } catch {}
+  }
+  for (const e of open.values()) {
+    const chat = { id: e.chat_id };
+    await handleText({ chat, from: { id: e.from_id }, update: { update_id: e.update_id },
+      message: { message_id: e.message_id, text: e.text },
+      reply: text => bot.api.sendMessage(e.chat_id, text), replyWithChatAction: async () => {} }, { replay: true });
+  }
+}
 
 bot.on('edited_message:text', async ctx => {
   const message = ctx.editedMessage;
@@ -237,26 +298,27 @@ async function pollWake() {
   // Background work runs as the Agent that currently executes the task (after a handoff: the new one),
   // in that Agent's own ops lane.
   const agentIdentity = agentIdentityFor(event.executor_id);
-  let chatKey = `ops-${agentIdentity.external_user_id}`, identity = agentIdentity, sessionFile, chatId = null;
+  let chatKey = `ops-${agentIdentity.external_user_id}`, identity = agentIdentity, sessionFile, chatId = null, role;
   if (event.kind === 'approval_decided' && event.deferred_ref) {
     // Reopen the very session whose tool call was blocked; it keeps the original sender's identity.
     const blockedSession = event.deferred_ref.split('#')[0];
     const original = [...ledger.values()].reverse().find(e => e.session_file === blockedSession && e.chat_key);
-    if (original) ({ chat_key: chatKey, identity, session_file: sessionFile, chat_id: chatId } = original);
+    if (original) ({ chat_key: chatKey, identity, session_file: sessionFile, chat_id: chatId, role } = original);
   }
   const text = `[系统事件 ${event.kind} · event ${event.event_id} · task ${event.task_id || '无'} · source_ref ${event.source_ref}]\n`
     + (EVENT_PROMPTS[event.kind] || '处理这个事件。');
   await inLane(chatKey, async () => {
     try {
-      const reply = await runTurn({ chatKey, chatId, identity, wakeEventId: event.event_id, taskId: event.task_id,
-        sourceRef: event.source_ref, text, sessionFile, agentIdentity });
-      if (reply && chatKey.startsWith('ops-')) {
-        // A fired reminder goes to its own recipient; other background results go to the owner.
-        await wb('/v1/delivery/enqueue', { recipient_id: event.recipient_id || OWNER_PRINCIPAL, channel: 'telegram',
-          payload: { text: reply }, dedupe_key: `wake:${event.event_id}`, task_id: event.task_id }).catch(() => {});
-      } else if (reply && chatId) {
-        await sendLong(chatId, reply);
-      }
+      // A fired reminder goes to its own recipient; other background results go to the owner; a reopened
+      // chat session (after an approval) answers in that chat.
+      const ops = chatKey.startsWith('ops-');
+      const recipientId = event.recipient_id || OWNER_PRINCIPAL;
+      await runTurn({ chatKey, chatId: ops ? null : chatId, identity, wakeEventId: event.event_id, taskId: event.task_id,
+        sourceRef: event.source_ref, text, sessionFile, agentIdentity, recipientId, role,
+        deliver: ops || !chatId
+          ? reply => wb('/v1/delivery/enqueue', { recipient_id: recipientId, channel: 'telegram',
+              payload: { text: reply }, dedupe_key: `wake:${event.event_id}`, task_id: event.task_id })
+          : reply => sendLong(chatId, reply) });
     } catch (error) {
       // Leave the lease to expire: WorkBench marks it unknown and the ledger tells us on restart.
       console.error('wake run failed:', event.kind, String(error?.message || error).slice(0, 200));
@@ -275,7 +337,9 @@ async function pumpDeliveries() {
     }
     try {
       const ids = await sendLong(chatId, String(item.payload?.text || ''));
-      await wb('/v1/delivery/settle', { delivery_id: item.delivery_id, status: 'sent', provider_message_id: ids.join(',') });
+      // A CLI run only printed it: settle as simulated so it never counts as a carrier receipt.
+      await wb('/v1/delivery/settle', CLI ? { delivery_id: item.delivery_id, status: 'simulated' }
+        : { delivery_id: item.delivery_id, status: 'sent', provider_message_id: ids.join(',') });
     } catch (error) {
       const definite = Number(error?.error_code) >= 400 && Number(error?.error_code) < 500;
       await wb('/v1/delivery/settle', { delivery_id: item.delivery_id, status: definite ? 'failed' : 'unknown' }).catch(() => {});
@@ -286,7 +350,10 @@ async function pumpDeliveries() {
 async function reconcileFromLedger() {
   // The ledger is the Host's record per event: completed runs are re-settled; a run still "running"
   // when this process died ended without a result and is settled as failed.
+  const awaitingReply = new Set([...ledger.values()].filter(e => e.status === 'reply_pending')
+    .flatMap(e => e.extra_ids || []));
   for (const entry of ledger.values()) {
+    if (awaitingReply.has(entry.event_id)) continue; // settled with its reply by retryPendingReplies
     if (entry.status === 'completed' && entry.run_ref) {
       await wb('/v1/wake/settle', { event_id: entry.event_id, status: 'completed', run_ref: entry.run_ref,
         session_ref: entry.session_ref }).catch(() => {});
@@ -299,10 +366,13 @@ async function reconcileFromLedger() {
 }
 
 await reconcileFromLedger();
+await retryPendingReplies();
+await replaySpool();
 setInterval(async () => {
   try {
     while (await pollWake()) { /* drain one lane at a time; WorkBench allows one live Run per workspace */ }
     await pumpDeliveries();
+    await retryPendingReplies();
     await retryMemoryWrites();
   } catch (error) {
     console.error('loop error:', String(error?.message || error).slice(0, 200));

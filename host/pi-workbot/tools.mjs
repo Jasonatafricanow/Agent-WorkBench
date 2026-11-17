@@ -2,6 +2,7 @@
 // Memory is written by the Agent itself at the end of a turn (owner decision 11-17), like a handoff note.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { wb } from './workbench-client.mjs';
 import { getTurn } from './turn-context.mjs';
@@ -30,6 +31,8 @@ export async function retryMemoryWrites() {
       const response = await fetch(MEM + p, { method: 'POST', signal: AbortSignal.timeout(8000),
         headers: { Authorization: 'Bearer ' + (process.env.MRMEM_TOKEN || ''), 'Content-Type': 'application/json' },
         body: JSON.stringify(body) });
+      // 4xx: MR-Mem rejected the write itself; replaying it unchanged can never succeed.
+      if (response.status >= 400 && response.status < 500) { console.error('memory write dropped:', response.status); continue; }
       if (!response.ok) left.push(line);
     } catch { left.push(line); }
   }
@@ -66,6 +69,10 @@ export function createWorkbenchTools(sessionManager) {
         headers: { Authorization: 'Bearer ' + (process.env.MRMEM_TOKEN || ''), 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...body, scope: MEM_SCOPE, collection: 'memory' }),
       });
+      if (response.status >= 400 && response.status < 500) {  // invalid request: queueing it would not help
+        const detail = await response.text().catch(() => '');
+        return { ...out({ error: 'MEMORY_REJECTED', message: `HTTP ${response.status} ${detail.slice(0, 120)}` }), isError: true };
+      }
       if (!response.ok) throw Error('HTTP ' + response.status);
       return out(await response.json());
     } catch (error) {
@@ -109,7 +116,7 @@ export function createWorkbenchTools(sessionManager) {
     { name: 'send_external_message', label: '对外发消息',
       description: 'Send a message to someone (e.g. a requester) on behalf of the owner about a specific task. Always goes through the delegation/approval guard; if it is blocked, stop and say it awaits approval. Not for replying in the current chat — just reply normally there.',
       parameters: Type.Object({ task_id: Type.String({ minLength: 1 }), recipient_principal_id: Type.String({ minLength: 1 }),
-        text: Type.String({ minLength: 1, maxLength: 3500 }), new_recipient: Type.Optional(Type.Boolean()) }),
+        text: Type.String({ minLength: 1, maxLength: 3500 }) }),
       execute: async (toolCallId, { task_id, recipient_principal_id, text }) => {
         const current = turn();
         try {
@@ -129,8 +136,14 @@ export function createWorkbenchTools(sessionManager) {
       parameters: Type.Object({ summary: Type.String({ minLength: 1, maxLength: 800 }), source_ref: Type.Optional(Type.String()) }),
       execute: async (toolCallId, { summary, source_ref }) => {
         const current = turn();
+        // MR-Mem's source contract: the note points at the original Pi session (session_id, so the
+        // compile layer and /forget can find it) and at the exact source text (sha256 fingerprint).
+        const sessionId = String(current.sessionId || 'unknown').replace(/[^\w-]/g, '-').slice(0, 80);
+        const fingerprint = crypto.createHash('sha256').update(current.sourceText || summary).digest('hex');
         return memory('/upsert', { id: `workbot:${current.wakeEventId || 'adhoc'}:${toolCallId}`, kind: 'aml-compiled-v1', text: summary,
-          sources: [{ store_id: 'workbench', source_namespace: 'workbot', record_id: source_ref || current.sourceRef || '' }] },
+          occurred_at: new Date().toISOString(),
+          sources: [{ store_id: 'workbench', source_namespace: 'workbot', session_id: sessionId,
+            record_id: source_ref || current.sourceRef || current.wakeEventId || 'unknown', fingerprint }] },
           { retry: true });
       } },
   ];

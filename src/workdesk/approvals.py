@@ -67,9 +67,17 @@ class ApprovalService:
 
     def decide(self, *, approver: ActorContext, approval_id: str, approve: bool, source_ref: str) -> dict:
         now = self._clock()
+        if type(approve) is not bool:  # "false", 0 or a missing field must never read as a decision
+            raise InvalidOperation("approve must be true or false", field="approve")
         if not source_ref:
             raise EvidenceRequired("a decision needs the approver's own message as source_ref")
         with write_transaction(self._db) as conn:
+            if approver.source != "cli" and not conn.execute(
+                    """SELECT 1 FROM inbox_messages i WHERE i.workspace_id=? AND i.sender_principal_id=?
+                       AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r WHERE r.inbox_id=i.id
+                            AND r.raw_source_ref=?))""",
+                    (approver.workspace_id, approver.principal_id, source_ref, source_ref)).fetchone():
+                raise EvidenceRequired("source_ref must be a message the approver actually sent")
             row = conn.execute("SELECT * FROM approval_requests WHERE workspace_id=? AND id=?",
                                (approver.workspace_id, approval_id)).fetchone()
             if row is None or row["approver_id"] != approver.principal_id:

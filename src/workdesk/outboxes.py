@@ -104,8 +104,11 @@ class DeliveryOutbox:
 
     def settle(self, *, workspace_id: str, delivery_id: str, status: str,
                provider_message_id: str | None = None) -> None:
-        if status not in ("sent", "failed", "unknown"):
-            raise InvalidOperation("status must be sent, failed or unknown")
+        # "simulated": a local CLI run printed it; nothing was delivered, so it can never serve as a receipt.
+        if status not in ("sent", "failed", "unknown", "simulated"):
+            raise InvalidOperation("status must be sent, failed, unknown or simulated")
+        if status == "simulated":
+            status, provider_message_id = "cancelled", "cli-simulated"
         if status == "sent" and not provider_message_id:
             raise InvalidOperation("sent needs the provider message id")
         with write_transaction(self._db) as conn:

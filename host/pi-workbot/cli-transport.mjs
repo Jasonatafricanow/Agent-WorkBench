@@ -3,9 +3,10 @@
 // message; replies and deliveries are printed. Script directives:
 //   /as <external_user_id>   send the following lines as someone else (default WORKBOT_CLI_USER)
 //   /sleep <seconds>         let the wake/delivery loop run
-//   /approve <id> | /deny <id>  go through the approval command handler
+//   /approve <id> | /deny <id>  go through the approval command handler ($APPROVAL = last id printed)
 //   # ...                    comment
-// After each message the transport waits until the reply was printed (or WORKBOT_CLI_TIMEOUT seconds).
+// After each message the transport waits until the gateway finished that message's Run
+// (or WORKBOT_CLI_TIMEOUT seconds). Deliveries are settled as "simulated", never as carrier receipts.
 import fs from 'node:fs';
 import readline from 'node:readline';
 
@@ -15,7 +16,9 @@ export function createCliBot(env) {
   // Ids must not repeat across runs: WorkBench dedupes inbound updates by (bot, update_id).
   let updateId = Date.now(), messageId = Date.now() % 1e9;
   let replied = null;
+  let lastApproval = '';
   const out = (who, text) => {
+    lastApproval = (String(text).match(/apr-[0-9a-f]{32}/g) || [lastApproval]).at(-1);
     console.log(`\n<<< [${who}]\n${text}\n`);
   };
   const api = {
@@ -30,6 +33,7 @@ export function createCliBot(env) {
       replyWithChatAction: async () => {},
     };
   };
+  const finish = () => { if (replied) { const done = replied; replied = null; setTimeout(done, 1500); } };
   const waitReply = () => new Promise(resolve => {
     const timer = setTimeout(() => { replied = null; console.log('(no reply within timeout)'); resolve(); },
       Number(env.WORKBOT_CLI_TIMEOUT || 300) * 1000);
@@ -40,12 +44,13 @@ export function createCliBot(env) {
     line = line.trim();
     if (!line || line.startsWith('#')) return;
     if (line.startsWith('/as ')) { user = line.slice(4).trim(); return; }
+    line = line.replace('$APPROVAL', lastApproval); // the last approval id this run printed
     if (line.startsWith('/sleep ')) { await new Promise(r => setTimeout(r, Number(line.slice(7)) * 1000)); return; }
     console.log(`>>> [${user}] ${line}`);
     const ctx = ctxFor(line);
     const command = handlers.commands.find(c => c.names.some(n => line.startsWith('/' + n)));
     const wait = waitReply();
-    if (command) { ctx.match = line.replace(/^\/\S+\s*/, ''); await command.fn(ctx); }
+    if (command) { ctx.match = line.replace(/^\/\S+\s*/, ''); await command.fn(ctx); finish(); }
     else await handlers.text(ctx);
     await wait;
   }
@@ -53,7 +58,7 @@ export function createCliBot(env) {
   return {
     api,
     // The gateway calls this when it finished a message's Run (deliveries may print before that).
-    turnDone() { if (replied) { const done = replied; replied = null; setTimeout(done, 1500); } },
+    turnDone: finish,
     command(names, fn) { handlers.commands.push({ names: [].concat(names), fn }); },
     on(filter, fn) { if (filter === 'message:text') handlers.text = fn; if (filter === 'edited_message:text') handlers.edited = fn; },
     catch() {},

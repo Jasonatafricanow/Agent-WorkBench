@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { wb } from '../workbench-client.mjs';
 
 const GUARDED: Record<string, any> = {
-  send_external_message: { action: 'send_external_message', task_from: 'task_id', conditions_from: 'new_recipient' },
+  // Whether the recipient is new is decided by WorkBench from delivery history (recipient_from), not by the model.
+  send_external_message: { action: 'send_external_message', task_from: 'task_id', recipient_from: 'recipient_principal_id' },
   ...JSON.parse(process.env.WORKBOT_GUARDED_TOOLS || '{}'),
 };
 const PROMPT_FILE = process.env.WORKBOT_PROMPT_FILE || fileURLToPath(new URL('./WORKBOT.md', import.meta.url));
@@ -46,11 +47,14 @@ export default function (pi: any) {
     if (taskId) {
       try {
         route = (await wb('/v1/evaluate_action', { identity: turn.agentIdentity || AGENT_IDENTITY, task_id: taskId,
-          action: rule.action, triggered_conditions: conditions })).route;
+          action: rule.action, triggered_conditions: conditions,
+          recipient_id: rule.recipient_from ? event.input?.[rule.recipient_from] ?? null : null })).route;
       } catch { route = 'human_approval_required'; }
     }
     if (route === 'agent_execute' || route === 'agent_execute_with_review') return undefined;
-    if (route !== 'human_approval_required') {
+    // Not delegated, but the owner asked for it in this very chat: that is the owner's call to confirm, so it
+    // becomes an approval request (one /approve) instead of a refusal. Anyone else is refused.
+    if (route !== 'human_approval_required' && turn.role !== 'owner') {
       return { block: true, reason: `Not delegated (${route}). Prepare it for the owner instead of executing.` };
     }
     const sessionRef = turn.sessionFile || sessionId;

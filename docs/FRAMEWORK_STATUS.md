@@ -78,7 +78,7 @@ asked for the full framework first; a detailed audit and fixes come next.
 | A6 | Memory: write checked against the chat person; no user binding; retries skipped revocation | reading is checked for the chat person, the wrap-up write for the handling Agent; `memory_user_id` is passed to MR-Mem; queued retries re-authorize |
 | A7 | `propose_change` urgency unvalidated and never announced | shared urgency rules + announcement |
 | B1 | After a handoff nobody ran as the new executor | claim returns `executor_id`; the Host runs background work as that Agent (`WORKBOT_AGENTS`) in its own lane; the guard evaluates as that Agent |
-| B2 | No guarded outward tool existed | `send_external_message` (always guarded; `new_recipient` triggers the approval condition) |
+| B2 | No guarded outward tool existed | `send_external_message` (always guarded; `new_recipient` is derived by WorkBench, see E3) |
 | B3 | Recurring occurrences lost delegation | an owner-approved `template.delegate` is applied to each occurrence, capped by the profile active at that time |
 | B4 | No session cross-evidence | the wake event ids are appended into the Pi session (`workbench-wake` entry) |
 | B5 | No "recently done" | added to overview and dashboard |
@@ -89,6 +89,20 @@ asked for the full framework first; a detailed audit and fixes come next.
 | C3 | Requesters didn't see their official due move | they now see it (without internal fields) |
 | C4 | A requester could be made a task's assignee | assignee limited to owner/editor |
 
-Remaining known gaps: the Telegram gateway has not run with a real bot token; MR-Mem
+## Third audit (Codex, 2026-11-17, after the first live CLI runs) — all fixed
+
+| # | Finding | Fix |
+|---|---|---|
+| E1 | A made-up `tg://` source could close a task or move an official due | strong evidence through a Host must resolve: `explicit_user` -> a message a team member (or the task's requester) really sent; `verified_tool` -> this task's confirmed delivery, matched watch or accepted deliverable |
+| E2 | An unrelated `sent` receipt plus any human's message could accept a deliverable | SUBMITTED needs a delivery of this task; outcomes need a message from the requester / commitment promisee (else the team), sent after submission |
+| E3 | `approve: "false"` counted as approval; fake decision sources accepted; `new_recipient` came from the model | `approve` must be a real boolean; the decision cites the approver's real inbox message (`/approve` is recorded through intake first); WorkBench derives `new_recipient` from delivery history |
+| E4 | A message whose Run died stayed `processing` forever; a reply could be lost after `completed` | Host spools inbound text until its Run finishes and replays on restart; WorkBench resumes the same wake event when its Run is dead; the reply is recorded (`reply_pending`) and sent before the Run is settled, and re-sent if it was not |
+| E5 | CLI runs wrote simulated `sent` receipts | CLI deliveries settle as `simulated` -> stored `cancelled` / `cli-simulated`, never usable as a receipt |
+| E7 | (live run) An outward message the owner asked for in chat was flatly refused when the task had no delegation | the owner's own request becomes an approval request (one `/approve`); for anyone else it is still refused; the reopened session keeps the requester's role |
+| E8 | (live run) An answer given inside a chat Run woke a second Run that repeated the same follow-up | a response recorded by a Host source is logged as handled inline; only CLI responses wake a Run |
+| E6 | MR-Mem rejected work-memory writes (no `session_id` / `fingerprint`) | sources carry the Pi session id and the sha256 of the turn's source text; 4xx rejections are reported, not queued forever |
+
+Remaining known gaps: the Telegram gateway has not run with a real bot token; the MR-Mem
+write path is fixed against the service's validation but not yet exercised live; MR-Mem
 side of the memory pointer queue is not consumed; message deletions and attachments are
 not handled; dashboard has no filters by project/requester yet.
