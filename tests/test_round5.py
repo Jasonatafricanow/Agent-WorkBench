@@ -47,6 +47,18 @@ class StrongEvidenceIsReal(Base):
             self.done(t, "d3", evidence_type="verified_tool", source_ref=self.delivery(other, "dl-other"))
         self.done(t, "d4", evidence_type="explicit_user", source_ref=self.inbox("owner", "o1"))
 
+    def test_reopen_needs_real_evidence_and_keeps_the_completion_history(self):  # A23
+        t = self.task()
+        self.done(t, "c", evidence_type="explicit_user", source_ref=self.inbox("owner", "o-done"))
+        reopen = lambda key, ref: self.apply(self.agent, key, {"op": "transition", "task_id": t, "expected_version": 2,
+                                                               "to": "READY", "evidence_type": "explicit_user",
+                                                               "source_ref": ref, "reason": "client found an error"})
+        with self.assertRaises(EvidenceRequired):
+            reopen("r1", "tg://bot/1/made-up")
+        reopen("r2", self.inbox("owner", "o-reopen"))
+        kinds = [e["kind"] for e in self.svc.read(actor=self.owner, task_id=t)["events"]]
+        self.assertEqual(kinds.count("state_changed"), 2)  # the completion stays on record
+
     def test_verified_tool_close_needs_this_tasks_confirmed_record(self):
         t = self.task()
         with self.assertRaises(EvidenceRequired):

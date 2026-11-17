@@ -17,6 +17,7 @@ import html
 import json
 import sqlite3
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -38,7 +39,7 @@ from .task_service import SqliteTaskService
 class WorkbenchApp:
     def __init__(self, database: str | Path, *, host_token: str, dashboard_token: str | None = None,
                  dashboard_workspace: str | None = None, dashboard_principal: str | None = None,
-                 clock: Callable[[], str] = utc_now, life_adapter=None):
+                 clock: Callable[[], str] = utc_now, life_adapter=None, status_token: str | None = None):
         if not host_token or len(host_token) < 16:
             raise ValueError("WORKBENCH_HOST_TOKEN must be set (16+ chars)")
         self.db = str(database)
@@ -47,6 +48,9 @@ class WorkbenchApp:
                                 if dashboard_token and dashboard_workspace and dashboard_principal else None)
         self.clock = clock
         self.life = life_adapter  # LifeStateAdapter for the owner's Life view only; never on the Host API
+        # Read-only token for workbench.status.v1 (desktop indicator); too short counts as not configured.
+        self.status_token = status_token if status_token and len(status_token) >= 24 else None
+        self.host_seen_at: float | None = None  # wall time of the Host's last authenticated call
         self.tasks = SqliteTaskService(self.db, clock=clock)
         self.identities = SqlIdentityProvider(self.db)
         self.approvals = ApprovalService(self.db, clock=clock)
@@ -183,7 +187,17 @@ class WorkbenchApp:
 
     def check_host(self, header: str | None) -> bool:
         expected = f"Bearer {self.host_token}"
-        return bool(header) and hmac.compare_digest(header, expected)
+        ok = bool(header) and hmac.compare_digest(header, expected)
+        if ok:
+            self.host_seen_at = time.time()  # Host liveness for the status indicator
+        return ok
+
+    def check_status(self, header: str | None) -> bool:
+        return bool(self.status_token and header) and hmac.compare_digest(header, f"Bearer {self.status_token}")
+
+    def status(self) -> dict:
+        from .status import build_status
+        return build_status(self.tasks, self.dashboard_actor, generated_at=self.clock(), host_seen_at=self.host_seen_at)
 
     def check_dashboard(self, header: str | None) -> bool:
         if not self.dashboard_actor or not header or not header.startswith("Basic "):
@@ -202,7 +216,9 @@ def _event_dict(event):
                                            "source_ref", "created_at", "task_id")}
 
 
-def make_handler(app: WorkbenchApp):
+def make_handler(app: WorkbenchApp, *, host_api: bool = True):
+    """host_api=False: the LAN listener — dashboard pages and /status/v1 only, no POST at all, so the
+    Host API (the only write path) never leaves loopback."""
     from urllib.parse import parse_qs
     from .dashboard import (render_calendar, render_dashboard, render_life, render_projects, render_task,
                             render_timeline)
@@ -226,6 +242,8 @@ def make_handler(app: WorkbenchApp):
         def do_GET(self):
             if self.path.split("?")[0] == "/healthz":
                 return self._send(200, {"ok": True})
+            if self.path.split("?")[0] == "/status/v1":
+                return _status_reply(self, app)
             route, _, query = self.path.partition("?")
             if route not in ("/", "/dashboard", *pages) and not route.startswith("/task/"):
                 return self._send(404, {"code": "NOT_FOUND"})
@@ -256,6 +274,8 @@ def make_handler(app: WorkbenchApp):
             self._send(200, page.encode("utf-8"), "text/html")
 
         def do_POST(self):
+            if not host_api:
+                return self._send(405, {"code": "METHOD_NOT_ALLOWED"})
             if not app.check_host(self.headers.get("Authorization")):
                 return self._send(401, {"code": "UNAUTHORIZED"})
             try:
@@ -280,6 +300,44 @@ def make_handler(app: WorkbenchApp):
                 return self._send(409, {"ok": False, "error": {"code": "CONSTRAINT", "message": str(exc)[:200]}})
 
     return Handler
+
+
+def _status_reply(handler, app: "WorkbenchApp") -> None:
+    if not app.status_token or not app.dashboard_actor:
+        return handler._send(404, {"code": "NOT_FOUND"})
+    if not app.check_status(handler.headers.get("Authorization")):
+        return handler._send(401, {"code": "UNAUTHORIZED"})
+    try:
+        return handler._send(200, app.status())
+    except WorkbenchError as exc:
+        return handler._send(503, {"code": exc.code})
+
+
+def make_status_handler(app: WorkbenchApp):
+    """A listener that serves only GET /status/v1 — what may be exposed to the LAN for the indicator."""
+    class StatusHandler(BaseHTTPRequestHandler):
+        server_version = "WorkBench-status/1"
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def _send(self, status: int, payload: Any, content_type: str = "application/json") -> None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type + "; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path.split("?")[0] != "/status/v1":
+                return self._send(404, {"code": "NOT_FOUND"})
+            return _status_reply(self, app)
+
+        def do_POST(self):
+            return self._send(405, {"code": "METHOD_NOT_ALLOWED"})
+    return StatusHandler
 
 
 def serve(app: WorkbenchApp, *, host: str = "127.0.0.1", port: int = 8790, timer_seconds: int = 30) -> None:
@@ -311,6 +369,21 @@ def serve(app: WorkbenchApp, *, host: str = "127.0.0.1", port: int = 8790, timer
                     print(f"{name} error: {exc}", flush=True)
 
     threading.Thread(target=timers, daemon=True).start()
+    # Optional second listener with only GET /status/v1, e.g. WORKBENCH_STATUS_BIND=0.0.0.0:8791, so a
+    # desktop indicator on another machine can read it while everything else stays on loopback.
+    # LAN listener for other devices (phone, other PCs): read-only dashboard + /status/v1, no Host API.
+    lan_bind = os.environ.get("WORKBENCH_LAN_BIND")
+    if lan_bind:
+        l_host, _, l_port = lan_bind.rpartition(":")
+        lan_server = ThreadingHTTPServer((l_host or "0.0.0.0", int(l_port)), make_handler(app, host_api=False))
+        threading.Thread(target=lan_server.serve_forever, daemon=True).start()
+        print(f"WorkBench LAN (read-only dashboard + status) listening on {l_host}:{l_port}", flush=True)
+    status_bind = os.environ.get("WORKBENCH_STATUS_BIND")
+    if status_bind and app.status_token:
+        s_host, _, s_port = status_bind.rpartition(":")
+        status_server = ThreadingHTTPServer((s_host or "127.0.0.1", int(s_port)), make_status_handler(app))
+        threading.Thread(target=status_server.serve_forever, daemon=True).start()
+        print(f"WorkBench status listening on {s_host}:{s_port}", flush=True)
     server = ThreadingHTTPServer((host, port), make_handler(app))
     print(f"WorkBench listening on {host}:{port}", flush=True)
     try:

@@ -41,6 +41,8 @@
 - `src/workdesk/profiles.py`：`DelegationProfileAdmin`，owner 专用的策略发布入口，**不经过 Agent 工具门面**。
 - 测试：`tests/test_task_service.py`（真实 SQLite 文件，含双写并发、批量回滚、重启、越权、委托上限、人回复回环）。
 
+**组件边界与开发日志**：[docs/SYSTEM_COMPONENT_BOUNDARIES.md](docs/SYSTEM_COMPONENT_BOUNDARIES.md)（WorkBench / MR-Mem / Host / Mind Runtime / Facetide / Statebar / LiteMonitor 各管什么）、[docs/DEV_LOG.md](docs/DEV_LOG.md)（设计思路、完成度、取舍、升级方向）。LiteMonitor 任务栏插件见 [host/litemonitor](host/litemonitor/README.md)。
+
 **2026-11-17 统一工作与生活看板（WB-LIFE-01）**：Dashboard 分为工作台/日历/时间线/项目池/生活五个只读视图；官方 DDL 与 Soft Due 分开显示、工作量每任务只算一次；生活视图只给 owner，经 Facetide 只读接口获取。见 [docs/LIFE_WORKBENCH.md](docs/LIFE_WORKBENCH.md)。
 
 **2026-11-17 第二步：整套框架已实现**（迁移、承诺/交付物/书签/增量、定时器与周期任务、派发与 unknown 对账、审批、通知、记忆指针、身份与入站、HTTP 接口、只读看板、Pi 工作 bot、部署样例）。逐项状态和已知缺口见 [docs/FRAMEWORK_STATUS.md](docs/FRAMEWORK_STATUS.md)。尚未部署，也未做细致审计。
