@@ -41,6 +41,11 @@ from .storage import read_snapshot, utc_now, write_transaction
 EVIDENCE = frozenset({"explicit_user", "verified_tool", "reported_third_party", "inferred", "system"})
 STRONG_EVIDENCE = frozenset({"explicit_user", "verified_tool"})
 READ_ALL_ROLES = frozenset({"owner", "editor", "viewer", "scheduler"})
+# What a requester may see of their own request's history: their own events, and the outward
+# milestones (creation, state, official due). Internal work (soft dues, progress notes) stays hidden.
+REQUESTER_EVENT_SCOPE = (
+    "AND t.requester_id=? AND (e.actor_id=? OR e.kind IN ('created','state_changed','official_due_set')"
+    " OR (e.kind IN ('patched','delayed') AND json_extract(e.after_json,'$.official_due_at') IS NOT NULL))")
 WRITE_ROLES = frozenset({"owner", "editor"})
 STATES = ("INBOX", "READY", "DOING", "WAITING", "BLOCKED", "DONE", "CANCELLED")
 OPEN_STATES = frozenset(STATES[:5])
@@ -330,9 +335,7 @@ class SqliteTaskService:
                 (ws, actor.principal_id, view)).fetchone()
             since = mark["last_seen_seq"] if mark else 0
             scope, args = ("", ()) if role in READ_ALL_ROLES else (
-                "AND t.requester_id=? AND (e.actor_id=? OR e.kind IN ('created','state_changed','official_due_set')"
-                " OR (e.kind IN ('patched','delayed') AND json_extract(e.after_json,'$.official_due_at') IS NOT NULL))",
-                (actor.principal_id, actor.principal_id))
+                REQUESTER_EVENT_SCOPE, (actor.principal_id, actor.principal_id))
             rows = conn.execute(
                 f"""SELECT e.rowid AS seq, e.task_id, t.title, e.kind, e.actor_id, e.reason, e.after_json,
                           e.evidence_type, e.occurred_at

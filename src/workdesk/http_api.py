@@ -27,6 +27,7 @@ from .dispatcher import Dispatcher
 from .errors import Forbidden, InvalidOperation, WorkbenchError
 from .identity import SqlIdentityProvider, finish_inbound, record_edit, record_inbound
 from .insights import schedule_load, stagnation
+from . import views
 from .outboxes import DeliveryOutbox, MemoryPointerQueue
 from .runtime_bridge import HostOutcome
 from .scheduler import fire_due, observe_watch
@@ -84,6 +85,16 @@ class WorkbenchApp:
                 triggered_conditions=body.get("triggered_conditions") or [], recipient_id=body.get("recipient_id")),
             "/v1/insights/stagnation": lambda: stagnation(self.db, actor=self.actor(body), now=now),
             "/v1/insights/schedule_load": lambda: schedule_load(self.db, actor=self.actor(body), now=now),
+            "/v1/views/calendar": lambda: views.calendar(
+                self.db, actor=self.actor(body), start=body["start"], end=body["end"],
+                project_id=body.get("project_id"), requester_id=body.get("requester_id")),
+            "/v1/views/timeline": lambda: views.timeline(
+                self.db, actor=self.actor(body), start=body["start"], end=body["end"],
+                project_id=body.get("project_id"), requester_id=body.get("requester_id"),
+                limit=body.get("limit", 300)),
+            "/v1/views/projects": lambda: views.projects(
+                self.db, actor=self.actor(body), project_id=body.get("project_id"),
+                requester_id=body.get("requester_id")),
             "/v1/wake/claim": lambda: self._claim(ws, int(body.get("lease_seconds", 600))),
             "/v1/wake/settle": lambda: self.dispatcher.settle(ws, body["event_id"], HostOutcome(
                 body["status"], body["run_ref"], body.get("session_ref"), body.get("deferred_ref"))),
