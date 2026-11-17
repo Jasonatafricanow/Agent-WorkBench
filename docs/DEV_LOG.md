@@ -97,7 +97,7 @@ PR：Agent-WorkBench#1（框架，草稿）← #2（WB-LIFE-01，叠在 #1 上�
 | Phase 4 Agent 工具与自然语言解释 | ✅ 完成 | 工具门面；四轮 CLI 真模型实测（建任务、进度、等待、催办、审批外发、崩溃恢复） |
 | Phase 5 MR-Mem 上下文与跨 Agent 同步 | 🟡 部分 | 工作记忆写入/检索已通（对 NAS 服务副本 + 向量实测）；编译层（SB/Thread）与 `memory_outbox` 消费者未接 |
 | Phase 6 时间调度与通知 | ✅ 完成 | 定时器、周期任务、日报、静默时段、重复催办、到期提醒 |
-| Phase 7 只读网页与部署 | 🟡 网页完成，未部署 | 五视图看板；部署样例在 `deploy/`，未上 NAS |
+| Phase 7 只读网页与部署 | ✅ WorkBench 本体 11-18 部署到 NAS；工作 bot 未部署 | 五视图看板；`/vol1/1000/personal-apps/workbench`，见第九节 |
 | Phase 8 运维与优化 | 🟡 部分 | 备份/校验命令、unknown 对账；没有监控告警之外的运维面板 |
 
 ### 4.2 按验收规格（ACCEPTANCE.md，A01–A34）
@@ -176,7 +176,11 @@ PR：Agent-WorkBench#1（框架，草稿）← #2（WB-LIFE-01，叠在 #1 上�
 
 **只管理模式改成"老实的控制台"（11-18，pi-web caeaed2，已部署；网关清单第二版 05:06 上线）**：用户指出 pi-web 原生的技能/MCP/模型/设置面板全是空的——它们读的是 pi-web 自己的空 agent 目录，即使接上溪月目录也只是配置、不是实际挂载。处理：后端写操作改白名单（管理页、删会话、UI 状态、登录，其余 403）；界面去掉输入框、新建/分支/改名、终端、上传、自动标题、Agents，设置只留界面偏好；原入口换成"管理 › 内核"，显示网关清单里的当前/默认/后台模型和思考等级、各 provider 与模型（凭据只记有无）、基础系统提示词、每个工具的说明和参数。网关清单第二版在切模型/思考等级后重写。上线清单：6 个 provider 都有凭据，当前 token-plan/qwen4-max-preview，默认 xiyue-model/deepseek-flash，46 个工具都带参数定义。NAS 构建时 Docker 镜像源拉不到 `# syntax=docker/dockerfile:1`，构建副本里删掉了这一行（仓库未改）。
 
-**内核页整合（11-18，pi-web af8afe8，已部署；网关第三版 05:38 上线）**：用户指出 skill/入口管理、人设与 AGENTS.md、工具详情显示、StateBar/营养的运行情况和入口都还缺，并希望整合到一起，WorkBench 也进来。查清：溪月模型直接看到 7 个入口 skill（xiyue-image 等），148 个专项工作流按入口归在 `skill-catalog.json`，由 `xiyue_skill_reference` 按编号或关键词调出；人设不是 AGENTS.md，而是 `xiyue.ts` 在 before_agent_start 把 溪月晶体详细版.md + SOUL.md + ADAPTATION.md + 记忆说明 + 状态快照 拼进提示词，Pi 没加载任何 AGENTS.md——所以之前页面上的"系统提示词"只是 6633 字的基础部分，不含人设。改动：内核页分区（概览/人设与提示词/模型/工具/Skill 与入口/服务/扩展）；工具改成列表 + 详情面板，参数逐行；Skill 按入口列工作流和打开/候选次数；服务区直接只读打开 StateBar 和营养的 SQLite（只读挂载），配上对应工具调用统计和营养观察窗链接（http://192.168.5.198:3456/）；WorkBench 读它的只读 status/v1（未部署，暂显示未配置）。网关第三版在每轮 agent_start 时记下实际提示词（无痕不记）和各人设文件位置，05:38 等溪月空闲后替换并重启（备份 `*.bak_20261118_mounts_v2`），实际提示词在下一轮回复时才写入。首次统计：nutrition_execute 50 次调用 20 次出错，值得单独查。
+**内核页整合（11-18，pi-web af8afe8，已部署；网关第三版 05:38 上线）**：用户指出 skill/入口管理、人设与 AGENTS.md、工具详情显示、StateBar/营养的运行情况和入口都还缺，并希望整合到一起，WorkBench 也进来。查清：溪月模型直接看到 7 个入口 skill（xiyue-image 等），148 个专项工作流按入口归在 `skill-catalog.json`，由 `xiyue_skill_reference` 按编号或关键词调出；人设不是 AGENTS.md，而是 `xiyue.ts` 在 before_agent_start 把 溪月晶体详细版.md + SOUL.md + ADAPTATION.md + 记忆说明 + 状态快照 拼进提示词，Pi 没加载任何 AGENTS.md——所以之前页面上的"系统提示词"只是 6633 字的基础部分，不含人设。改动：内核页分区（概览/人设与提示词/模型/工具/Skill 与入口/服务/扩展）；工具改成列表 + 详情面板，参数逐行；Skill 按入口列工作流和打开/候选次数；服务区直接只读打开 StateBar 和营养的 SQLite（只读挂载），配上对应工具调用统计和营养观察窗链接（http://192.168.5.198:3456/）；WorkBench 读它的只读 status/v1（未部署，暂显示未配置）。网关第三版在每轮 agent_start 时记下实际提示词（无痕不记）和各人设文件位置，05:38 等溪月空闲后替换并重启（备份 `*.bak_20261118_mounts_v2`），实际提示词在下一轮回复时才写入。
+
+**管理页布局重构 + MR-Mem 记忆列表（11-18，pi-web e99aba2，已部署）**：用户反馈页面太长、手机上要么缩放显示不全要么字超小。根因是 pi-web 全局把 html/body 锁成一屏高并 overflow hidden，管理页没有自己的滚动容器，超出部分被裁掉。改为页面自滚动、顶栏单行固定；交互产物每页 30、会话每页 20、表格超过 15 行分页；窄屏表格改成每行一张卡片；画廊手机上三列小图。服务区新增 MR-Mem：只读打开向量库，仅读 `xiyue-pi/memory`（34 条），可搜索、分页、跳来源会话。
+
+**WorkBench 部署到 NAS（11-18）**：`/vol1/1000/personal-apps/workbench`（`src/` 为 feat/session-console 9a865d9，`data/workbench.sqlite` 新库，`workbench.env` 存三个随机令牌），容器 `workbench`，镜像 `workbench:9a865d9`，以 1000:1001 运行。主接口 8790 只绑 NAS 本机；只读看板和状态 8791 开放给局域网（http://192.168.5.198:8791/，Basic 认证，密码是 `WORKBENCH_DASHBOARD_TOKEN`）。定时器和备份（`/data/backups`）由 serve 进程自带。bootstrap：工作区 work/工作，owner/主人，agent/工作bot；高老师未加，工作 bot 未部署（缺正式 Telegram token），所以状态显示"Host离线"。pi-web 经 `workbench_default` 网络读 `/status/v1`，状态令牌已复制进 pi-web 的 `.env`。坑：NAS 默认 umask 让解包的源码只有属主可读，镜像里 root 所有、容器以 1000 运行读不到，`python -m workdesk` 报找不到 `__main__`；构建前 `chmod -R a+rX src` 解决。Facetide 生活视图未接（需要 `FACETIDE_SUMMARY_URL/TOKEN`）。首次统计：nutrition_execute 50 次调用 20 次出错，值得单独查。
 
 **需求**（用户原话整理）：多设备，希望有自己的前端页面；现在通过 Telegram 管理 session、删改记录很不方便；有些 session 的交互不想写进记忆，用完就想直接删；交互过程中产生的文件（生成的图、收到的照片）有的要留、有的用完就不要，需要集中可视化管理，否则越堆越多。
 
