@@ -107,6 +107,10 @@ written once; first reply send failing -> re-sent by the loop and only then sett
 write/search against a local copy of the NAS vector service with embeddings (hybrid ranking correct);
 memory notes no longer generalise one occurrence (WORKBOT.md rule 3).
 
+Unified work/life dashboard (WB-LIFE-01, 2026-11-17): five read-only views, separate official/soft
+calendar markers with load counted once per task, calendar/timeline/projects views on the Host API,
+owner-only Life view through LifeStateAdapter -> Facetide `facetide.summary.v1`. See docs/LIFE_WORKBENCH.md.
+
 Remaining known gaps: the Telegram gateway has not run with a real bot token; MR-Mem
 side of the memory pointer queue is not consumed; message deletions and attachments are
 not handled; dashboard has no filters by project/requester yet.

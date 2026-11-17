@@ -27,6 +27,7 @@ from .dispatcher import Dispatcher
 from .errors import Forbidden, InvalidOperation, WorkbenchError
 from .identity import SqlIdentityProvider, finish_inbound, record_edit, record_inbound
 from .insights import schedule_load, stagnation
+from . import views
 from .outboxes import DeliveryOutbox, MemoryPointerQueue
 from .runtime_bridge import HostOutcome
 from .scheduler import fire_due, observe_watch
@@ -37,7 +38,7 @@ from .task_service import SqliteTaskService
 class WorkbenchApp:
     def __init__(self, database: str | Path, *, host_token: str, dashboard_token: str | None = None,
                  dashboard_workspace: str | None = None, dashboard_principal: str | None = None,
-                 clock: Callable[[], str] = utc_now):
+                 clock: Callable[[], str] = utc_now, life_adapter=None):
         if not host_token or len(host_token) < 16:
             raise ValueError("WORKBENCH_HOST_TOKEN must be set (16+ chars)")
         self.db = str(database)
@@ -45,6 +46,7 @@ class WorkbenchApp:
         self.dashboard_actor = (ActorContext(dashboard_workspace, dashboard_principal, "owner", "dashboard")
                                 if dashboard_token and dashboard_workspace and dashboard_principal else None)
         self.clock = clock
+        self.life = life_adapter  # LifeStateAdapter for the owner's Life view only; never on the Host API
         self.tasks = SqliteTaskService(self.db, clock=clock)
         self.identities = SqlIdentityProvider(self.db)
         self.approvals = ApprovalService(self.db, clock=clock)
@@ -84,6 +86,16 @@ class WorkbenchApp:
                 triggered_conditions=body.get("triggered_conditions") or [], recipient_id=body.get("recipient_id")),
             "/v1/insights/stagnation": lambda: stagnation(self.db, actor=self.actor(body), now=now),
             "/v1/insights/schedule_load": lambda: schedule_load(self.db, actor=self.actor(body), now=now),
+            "/v1/views/calendar": lambda: views.calendar(
+                self.db, actor=self.actor(body), start=body["start"], end=body["end"],
+                project_id=body.get("project_id"), requester_id=body.get("requester_id")),
+            "/v1/views/timeline": lambda: views.timeline(
+                self.db, actor=self.actor(body), start=body["start"], end=body["end"],
+                project_id=body.get("project_id"), requester_id=body.get("requester_id"),
+                limit=body.get("limit", 300)),
+            "/v1/views/projects": lambda: views.projects(
+                self.db, actor=self.actor(body), project_id=body.get("project_id"),
+                requester_id=body.get("requester_id")),
             "/v1/wake/claim": lambda: self._claim(ws, int(body.get("lease_seconds", 600))),
             "/v1/wake/settle": lambda: self.dispatcher.settle(ws, body["event_id"], HostOutcome(
                 body["status"], body["run_ref"], body.get("session_ref"), body.get("deferred_ref"))),
@@ -191,7 +203,10 @@ def _event_dict(event):
 
 
 def make_handler(app: WorkbenchApp):
-    from .dashboard import render_dashboard, render_task
+    from urllib.parse import parse_qs
+    from .dashboard import (render_calendar, render_dashboard, render_life, render_projects, render_task,
+                            render_timeline)
+    pages = {"/calendar", "/timeline", "/projects", "/life"}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "WorkBench/1"
@@ -211,21 +226,33 @@ def make_handler(app: WorkbenchApp):
         def do_GET(self):
             if self.path.split("?")[0] == "/healthz":
                 return self._send(200, {"ok": True})
-            route = self.path.split("?")[0]
-            if route not in ("/", "/dashboard") and not route.startswith("/task/"):
+            route, _, query = self.path.partition("?")
+            if route not in ("/", "/dashboard", *pages) and not route.startswith("/task/"):
                 return self._send(404, {"code": "NOT_FOUND"})
             if not app.check_dashboard(self.headers.get("Authorization")):
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="WorkBench"')
                 self.end_headers()
                 return
+            # Query values only narrow a view; `views` checks them against the dashboard owner's scope.
+            q = {k: v[0] for k, v in parse_qs(query).items() if v and v[0]}
+            actor, now = app.dashboard_actor, app.clock()
+            narrow = {"project": q.get("project"), "requester": q.get("requester")}
             try:
                 if route.startswith("/task/"):
-                    page = render_task(app.tasks, app.dashboard_actor, app.db, route[len("/task/"):], app.clock())
+                    page = render_task(app.tasks, actor, app.db, route[len("/task/"):], now)
+                elif route == "/calendar":
+                    page = render_calendar(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"), **narrow)
+                elif route == "/timeline":
+                    page = render_timeline(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"), **narrow)
+                elif route == "/projects":
+                    page = render_projects(app.tasks, actor, app.db, now, **narrow)
+                elif route == "/life":
+                    page = render_life(actor, app.db, now, app.life)
                 else:
-                    page = render_dashboard(app.tasks, app.dashboard_actor, app.db, app.clock())
-            except WorkbenchError:
-                return self._send(404, {"code": "NOT_FOUND"})
+                    page = render_dashboard(app.tasks, actor, app.db, now)
+            except WorkbenchError as exc:
+                return self._send(404 if exc.code in ("NOT_FOUND", "FORBIDDEN") else 400, {"code": exc.code})
             self._send(200, page.encode("utf-8"), "text/html")
 
         def do_POST(self):
