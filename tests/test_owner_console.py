@@ -111,10 +111,13 @@ class OwnerConsoleTests(Base):
     def test_companion_writes_as_the_owner_citing_the_owners_message(self):
         bind_identity(self.db, provider="telegram", bot_id="xiyue", external_user_id="42", principal_id="owner")
         ident = {"provider": "telegram", "bot_id": "xiyue", "external_user_id": "42"}
-        status, inbound = self.companion("/v1/intake/inbound", {
+        status, inbound = self.companion("/v1/companion/message", {
             "workspace_id": "ws", "platform": "telegram", "bot_id": "xiyue", "update_id": "u1", "chat_id": "42",
             "message_id": "7", "external_user_id": "42", "raw_source_ref": "tg://xiyue/42/7"})
         self.assertEqual(status, 200)
+        # Answered inline by the companion: nothing left for the work bot, nothing "unknown".
+        self.assertEqual(self.q("SELECT status FROM wake_events"), [("completed",)])
+        self.assertEqual(self.q("SELECT status FROM inbox_messages"), [("done",)])
         task = self.task()
         status, result = self.companion("/v1/tools/change_tasks", {
             "workspace_id": "ws", "identity": ident, "idempotency_key": "x1",
@@ -129,4 +132,5 @@ class OwnerConsoleTests(Base):
         other_bot = {"provider": "telegram", "bot_id": "workbot", "external_user_id": "42"}
         self.assertEqual(self.companion("/v1/tools/list_tasks", {"workspace_id": "ws", "identity": other_bot})[0], 403)
         self.assertEqual(self.companion("/v1/wake/claim", {"workspace_id": "ws"})[0], 403)
+        self.assertEqual(self.companion("/v1/intake/inbound", {"workspace_id": "ws", "bot_id": "xiyue"})[0], 403)
         self.assertEqual(self.companion("/v1/tools/list_tasks", {"workspace_id": "ws"}, token="z" * 32)[0], 401)

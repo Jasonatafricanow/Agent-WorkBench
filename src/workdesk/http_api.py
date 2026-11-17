@@ -85,6 +85,7 @@ class WorkbenchApp:
             "/v1/intake/edited": lambda: record_edit(self.db, clock=self.clock, **{k: body[k] for k in (
                 "workspace_id", "platform", "bot_id", "update_id", "chat_id", "message_id",
                 "external_user_id", "raw_source_ref")}),
+            "/v1/companion/message": lambda: self.companion_message(body),
             "/v1/intake/finish":lambda: finish_inbound(self.db, workspace_id=ws, inbox_id=body["inbox_id"],
                                                         ok=bool(body.get("ok")), clock=self.clock),
             "/v1/tools/list_tasks": lambda: self.tasks.overview(actor=self.actor(body), limit=int(body.get("limit", 50))),
@@ -222,7 +223,7 @@ class WorkbenchApp:
         return "viewer" if hmac.compare_digest(password, self.dashboard_token) else None
 
     COMPANION_ROUTES = frozenset({"/v1/tools/list_tasks", "/v1/tools/get_task", "/v1/tools/change_tasks",
-                                  "/v1/tools/whats_new", "/v1/intake/inbound", "/v1/intake/finish"})
+                                  "/v1/tools/whats_new", "/v1/companion/message"})
 
     def check_companion(self, header: str | None, path: str, body: dict) -> bool:
         """The companion token only reaches its routes, and only as its own bot (identity or inbound bot_id)."""
@@ -231,7 +232,22 @@ class WorkbenchApp:
         if not hmac.compare_digest(header, f"Bearer {self.companion_token}"):
             return False
         bot = (body.get("identity") or {}).get("bot_id") if path.startswith("/v1/tools/") else body.get("bot_id")
-        return path == "/v1/intake/finish" or bot == self.companion_bot_id
+        return bot == self.companion_bot_id
+
+    def companion_message(self, body: dict) -> dict:
+        """Record the owner's message of this turn so a strong change can cite it (ids only, never its text).
+        The companion answers it inline, so its wake event is settled and the message closed at once: nothing
+        is left for the work bot to claim and no outcome turns "unknown"."""
+        ws = body["workspace_id"]
+        result = record_inbound(self.db, clock=self.clock, workspace_id=ws, platform=body["platform"],
+                                bot_id=self.companion_bot_id, update_id=body["update_id"], chat_id=body["chat_id"],
+                                message_id=body["message_id"], external_user_id=body["external_user_id"],
+                                raw_source_ref=body["raw_source_ref"], handled_inline=True)
+        if result.get("wake_event_id"):
+            self.dispatcher.settle(ws, result["wake_event_id"], HostOutcome("completed", f"companion:{self.companion_bot_id}"))
+        if result.get("inbox_id") and result.get("accepted"):
+            finish_inbound(self.db, workspace_id=ws, inbox_id=result["inbox_id"], ok=True, clock=self.clock)
+        return {"source_ref": body["raw_source_ref"], "accepted": bool(result.get("accepted")) or bool(result.get("duplicate"))}
 
     def owner_form(self, form: dict) -> str:
         """Run one owner form; returns the success message (raises WorkbenchError on refusal)."""
