@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+.env
+.venv/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# local test run (secrets, db, runtime)
+.local/
