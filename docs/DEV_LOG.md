@@ -172,7 +172,7 @@ PR：Agent-WorkBench#1（框架，草稿）← #2（WB-LIFE-01，叠在 #1 上�
 
 **NAS 部署（11-18）**：`/vol1/1000/personal-apps/pi-web`（`src/` 为 manage-console 分支 5036c32 的源码，`compose.yaml`，`.env` 存登录密码和 MR-Mem 令牌，`state/` 存保留标记）。镜像 `pi-web-manage:5036c32`，容器 `pi-web-manage`，局域网 `http://192.168.5.198:30141/manage`。只管理模式开启；pi-web 自己的 agent 目录独立（`agent/`），只把溪月的 `sessions/` 挂进去，所以不会往溪月的 agent 目录写设置；MR-Mem 走 `mrmem-vector_default` 网络，用只限 `xiyue-pi/memory` 的令牌。上线检查：启动前后溪月会话目录没有变化；删除预览的记忆数与库里按会话号统计一致。注意：溪月有 10 条记忆的来源会话号是 `xiyue-user`，不对应任何会话文件，删会话不会删到它们。
 
-**对话里显示生图 + 挂载与调用（11-18，pi-web 04818ce，已部署）**：溪月生图/发图在会话里只留一行带路径的 JSON，原来只显示文字；现在按路径把图片显示在工具卡片下（只放行 `/xiyue/workspace` 里的位图）。管理页加"挂载与调用"：调用次数/出错/最近时间从会话记录统计（真实数据）；挂载情况只认网关写的运行时清单（`manage-export/xiyue-mounts.json`），不拿 settings 文件猜——溪月的工具按条件挂、skill 按 loadout 过滤、MCP 读环境变量，配置文件说明不了实际挂了什么。网关补丁在 pi-web `deploy/xiyue-gateway/`，**未部署**（要改溪月网关并重启 xiyue-pi）。首次统计：nutrition_execute 50 次调用 20 次出错，值得单独查。
+**对话里显示生图 + 挂载与调用（11-18，pi-web 04818ce，已部署）**：溪月生图/发图在会话里只留一行带路径的 JSON，原来只显示文字；现在按路径把图片显示在工具卡片下（只放行 `/xiyue/workspace` 里的位图）。管理页加"挂载与调用"：调用次数/出错/最近时间从会话记录统计（真实数据）；挂载情况只认网关写的运行时清单（`manage-export/xiyue-mounts.json`），不拿 settings 文件猜——溪月的工具按条件挂、skill 按 loadout 过滤、MCP 读环境变量，配置文件说明不了实际挂了什么。网关补丁在 pi-web `deploy/xiyue-gateway/`，11-18 03:41 部署（等溪月空闲后替换并重启 xiyue-pi；备份 `*.bak_20261118_mounts`）。首份清单：46 个工具（powershell 已挂未启用）、2 个扩展无报错、7 个 skill 挂载 / 150 个被过滤、MCP 只有 nutrition（放行 execute、query）。首次统计：nutrition_execute 50 次调用 20 次出错，值得单独查。
 
 **需求**（用户原话整理）：多设备，希望有自己的前端页面；现在通过 Telegram 管理 session、删改记录很不方便；有些 session 的交互不想写进记忆，用完就想直接删；交互过程中产生的文件（生成的图、收到的照片）有的要留、有的用完就不要，需要集中可视化管理，否则越堆越多。
 
