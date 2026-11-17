@@ -21,8 +21,13 @@ export function createCliBot(env) {
     lastApproval = (String(text).match(/apr-[0-9a-f]{32}/g) || [lastApproval]).at(-1);
     console.log(`\n<<< [${who}]\n${text}\n`);
   };
+  // WORKBOT_CLI_FAIL_SENDS=N: the first N sends throw like a network error (tests the reply re-send path).
+  let failSends = Number(env.WORKBOT_CLI_FAIL_SENDS || 0);
   const api = {
-    sendMessage: async (chatId, text) => { out(`to chat ${chatId}`, text); return { message_id: ++messageId }; },
+    sendMessage: async (chatId, text) => {
+      if (failSends > 0) { failSends -= 1; console.log(`(simulated send failure to chat ${chatId})`); throw Error('simulated network error'); }
+      out(`to chat ${chatId}`, text); return { message_id: ++messageId };
+    },
   };
   const ctxFor = (text) => {
     const chat = { id: Number(user) || user };

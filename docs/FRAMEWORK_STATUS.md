@@ -102,7 +102,11 @@ asked for the full framework first; a detailed audit and fixes come next.
 | E8 | (live run) An answer given inside a chat Run woke a second Run that repeated the same follow-up | a response recorded by a Host source is logged as handled inline; only CLI responses wake a Run |
 | E6 | MR-Mem rejected work-memory writes (no `session_id` / `fingerprint`) | sources carry the Pi session id and the sha256 of the turn's source text; 4xx rejections are reported, not queued forever |
 
-Remaining known gaps: the Telegram gateway has not run with a real bot token; the MR-Mem
-write path is fixed against the service's validation but not yet exercised live; MR-Mem
+Live checks (local CLI, 2026-11-17): crash mid-Run -> replayed and resumed on the same wake event,
+written once; first reply send failing -> re-sent by the loop and only then settled; work-memory
+write/search against a local copy of the NAS vector service with embeddings (hybrid ranking correct);
+memory notes no longer generalise one occurrence (WORKBOT.md rule 3).
+
+Remaining known gaps: the Telegram gateway has not run with a real bot token; MR-Mem
 side of the memory pointer queue is not consumed; message deletions and attachments are
 not handled; dashboard has no filters by project/requester yet.

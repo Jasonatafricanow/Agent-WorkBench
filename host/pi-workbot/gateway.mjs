@@ -128,10 +128,11 @@ async function runTurn({ chatKey, chatId, identity, wakeEventId, taskId, sourceR
   if (reply && deliver) {
     record({ event_id: wakeEventId, status: 'reply_pending', reply, chat_id: chatId, extra_ids: extraWakeIds,
       task_id: taskId, recipient_id: recipientId, outcome });
+    delivering.add(wakeEventId); // the periodic re-send must not race the first attempt
     try { await deliver(reply); } catch (error) {
       console.error('reply not sent yet:', String(error?.message || error).slice(0, 200));
       return reply; // retried by retryPendingReplies
-    }
+    } finally { delivering.delete(wakeEventId); }
   }
   for (const id of ids) {
     record({ event_id: id, ...outcome });
@@ -140,13 +141,16 @@ async function runTurn({ chatKey, chatId, identity, wakeEventId, taskId, sourceR
   return reply;
 }
 
+const delivering = new Set(); // wake ids whose reply is being sent right now
 async function retryPendingReplies() {
-  for (const entry of [...ledger.values()].filter(e => e.status === 'reply_pending' && e.reply)) {
+  for (const entry of [...ledger.values()].filter(e => e.status === 'reply_pending' && e.reply && !delivering.has(e.event_id))) {
+    delivering.add(entry.event_id);
     try {
       if (entry.chat_id) await sendLong(entry.chat_id, entry.reply);
       else await wb('/v1/delivery/enqueue', { recipient_id: entry.recipient_id || OWNER_PRINCIPAL, channel: 'telegram',
         payload: { text: entry.reply }, dedupe_key: `wake:${entry.event_id}`, task_id: entry.task_id });
-    } catch { continue; }
+    } catch { continue; } finally { delivering.delete(entry.event_id); }
+    console.log('pending reply re-sent:', entry.event_id);
     for (const id of [entry.event_id, ...(entry.extra_ids || [])]) {
       record({ event_id: id, ...entry.outcome });
       await wb('/v1/wake/settle', { event_id: id, ...entry.outcome }).catch(() => {});

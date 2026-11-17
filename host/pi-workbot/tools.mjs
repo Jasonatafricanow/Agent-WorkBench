@@ -132,7 +132,7 @@ export function createWorkbenchTools(sessionManager) {
       parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 500 }) }),
       execute: async (_id, { query }) => memory('/search', { text: query, limit: 5 }) },
     { name: 'work_memory_write', label: '收尾写工作记忆',
-      description: 'At the end of a turn, write what future work needs (decision, preference, who/what/when and how it was settled), pointing at the source. Like a handoff note. Skip small talk.',
+      description: 'At the end of a turn, write a handoff note of what was actually stated or done this turn: who said/decided/did what, and when, pointing at the source. Not your own inferences, advice or predictions, and never generalise one occurrence into "always/often/usually" (patterns are left to the memory system). Your suggestions belong in the reply; record them only once the owner agreed. Skip small talk.',
       parameters: Type.Object({ summary: Type.String({ minLength: 1, maxLength: 800 }), source_ref: Type.Optional(Type.String()) }),
       execute: async (toolCallId, { summary, source_ref }) => {
         const current = turn();
