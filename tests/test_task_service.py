@@ -135,6 +135,17 @@ class EvidenceTests(Fixture):
                                              "source_ref": SRC, "reason": "user confirmed delivery accepted"})
         self.assertEqual(done[0]["version"], 2)
 
+    def test_inbox_item_can_be_closed_directly_with_the_owners_word(self):
+        # 11-20: "that one is done" about an inbox item; Xiyue was refused INBOX -> DONE.
+        task = self.create(state="INBOX")["task_id"]
+        with self.assertRaises(EvidenceRequired):
+            self.apply(self.agent, "i1", {"op": "transition", "task_id": task, "expected_version": 1,
+                                          "to": "DONE", "evidence_type": "inferred", "reason": "looks done"})
+        done = self.apply(self.agent, "i2", {"op": "transition", "task_id": task, "expected_version": 1,
+                                             "to": "DONE", "evidence_type": "explicit_user",
+                                             "source_ref": SRC, "reason": "owner said it is done"})
+        self.assertEqual(done[0]["version"], 2)
+
     def test_official_due_change_and_delay_are_justified(self):
         task = self.create(official_due_at="2026-11-30T09:00:00Z", soft_due_at="2026-11-25T09:00:00Z")["task_id"]
         with self.assertRaises(EvidenceRequired):

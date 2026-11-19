@@ -50,7 +50,7 @@ WRITE_ROLES = frozenset({"owner", "editor"})
 STATES = ("INBOX", "READY", "DOING", "WAITING", "BLOCKED", "DONE", "CANCELLED")
 OPEN_STATES = frozenset(STATES[:5])
 TRANSITIONS = {
-    "INBOX": {"READY", "DOING", "CANCELLED"},
+    "INBOX": {"READY", "DOING", "DONE", "CANCELLED"},  # "that one is done" straight from the inbox (11-20); closing still needs evidence
     "READY": {"DOING", "WAITING", "BLOCKED", "DONE", "CANCELLED"},
     "DOING": {"READY", "WAITING", "BLOCKED", "DONE", "CANCELLED"},
     "WAITING": {"READY", "DOING", "BLOCKED", "DONE", "CANCELLED"},
