@@ -92,9 +92,9 @@ class MigrationTests(unittest.TestCase):
                 c.execute("INSERT INTO workspaces VALUES('w','W','o','UTC',?)", (NOW,))
                 c.execute("INSERT INTO tasks(id,workspace_id,title,created_at,updated_at) VALUES('t','w','Old',?,?)", (NOW, NOW))
             self.assertEqual(schema_version(db), 1)
-            self.assertEqual(migrate(db, backup_to=backup), [2, 3, 4])
+            self.assertEqual(migrate(db, backup_to=backup), [2, 3, 4, 5])
             self.assertEqual(migrate(db), [])
-            self.assertEqual(schema_version(db), 4)
+            self.assertEqual(schema_version(db), 5)
             with closing(sqlite3.connect(db)) as c:
                 self.assertEqual(c.execute("SELECT title, official_due_precision FROM tasks").fetchone(), ("Old", None))
             with closing(sqlite3.connect(backup)) as c:

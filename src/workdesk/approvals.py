@@ -122,6 +122,40 @@ class ApprovalService:
             conn.execute("UPDATE approval_requests SET consumed_at=? WHERE id=?", (now, row["id"]))
             return {"approval_id": row["id"]}
 
+    def record_external(self, *, approver: ActorContext, recorded_by: str, system: str, action: str,
+                        subject_ref: str, payload_digest: str, source_ref: str, decided_at: str,
+                        issued_at: str | None = None) -> dict:
+        """Audit an approval the owner gave inside another system's flow (Facetide review passphrase).
+        It must cite a message the approver really sent; the same message is recorded once."""
+        now = self._clock()
+        if approver.role != "owner":
+            raise Forbidden("only the owner's approvals are recorded here")
+        for name, value in (("system", system), ("action", action), ("subject_ref", subject_ref),
+                            ("payload_digest", payload_digest), ("source_ref", source_ref)):
+            if not isinstance(value, str) or not value or len(value) > 300:
+                raise InvalidOperation(f"{name} is required", field=name)
+        for name, value in (("decided_at", decided_at), ("issued_at", issued_at)):
+            if value is not None and not (isinstance(value, str) and value.endswith("Z")):
+                raise InvalidOperation(f"{name} must be UTC ISO ending in Z", field=name)
+        if not decided_at:
+            raise InvalidOperation("decided_at is required", field="decided_at")
+        with write_transaction(self._db) as conn:
+            if not conn.execute(
+                    """SELECT 1 FROM inbox_messages WHERE workspace_id=? AND sender_principal_id=? AND raw_source_ref=?""",
+                    (approver.workspace_id, approver.principal_id, source_ref)).fetchone():
+                raise EvidenceRequired("source_ref must be a message the approver actually sent")
+            row = conn.execute("SELECT id FROM external_approvals WHERE workspace_id=? AND system=? AND source_ref=?",
+                               (approver.workspace_id, system, source_ref)).fetchone()
+            if row is not None:
+                return {"external_approval_id": row["id"], "duplicate": True}
+            approval_id = f"xap-{uuid.uuid4().hex}"
+            conn.execute(
+                """INSERT INTO external_approvals(id,workspace_id,system,action,subject_ref,payload_digest,approver_id,
+                     recorded_by,source_ref,issued_at,decided_at,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (approval_id, approver.workspace_id, system, action, subject_ref, payload_digest,
+                 approver.principal_id, recorded_by, source_ref, issued_at, decided_at, now))
+            return {"external_approval_id": approval_id, "duplicate": False}
+
     def revoke(self, *, owner: ActorContext, approval_id: str) -> None:
         with write_transaction(self._db) as conn:
             role = conn.execute("SELECT role FROM memberships WHERE workspace_id=? AND principal_id=? AND active=1",

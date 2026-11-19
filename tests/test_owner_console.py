@@ -127,6 +127,25 @@ class OwnerConsoleTests(Base):
         self.assertEqual(self.q("SELECT state FROM tasks WHERE id=?", task), [("DONE",)])
         self.assertIsNone(self.app.host_seen_at)  # the companion is not the work bot coming online
 
+    def test_companion_records_an_owner_approval_once_citing_the_owners_message(self):
+        bind_identity(self.db, provider="telegram", bot_id="xiyue", external_user_id="42", principal_id="owner")
+        ident = {"provider": "telegram", "bot_id": "xiyue", "external_user_id": "42"}
+        body = {"workspace_id": "ws", "identity": ident, "system": "facetide", "action": "review_confirm",
+                "subject_ref": "draft-1", "payload_digest": "ab" * 16, "source_ref": "tg://xiyue/42/9",
+                "decided_at": "2026-11-19T10:00:00Z", "issued_at": "2026-11-19T09:55:00Z"}
+        # Not a message the owner sent: refused.
+        self.assertEqual(self.companion("/v1/tools/record_approval", body)[0], 422)
+        self.companion("/v1/companion/message", {
+            "workspace_id": "ws", "platform": "telegram", "bot_id": "xiyue", "update_id": "u9", "chat_id": "42",
+            "message_id": "9", "external_user_id": "42", "raw_source_ref": "tg://xiyue/42/9"})
+        status, first = self.companion("/v1/tools/record_approval", body)
+        self.assertEqual(status, 200, first)
+        status, again = self.companion("/v1/tools/record_approval", body)
+        self.assertEqual((again["result"]["duplicate"], again["result"]["external_approval_id"]),
+                         (True, first["result"]["external_approval_id"]))
+        self.assertEqual(self.q("SELECT system,subject_ref,approver_id,recorded_by FROM external_approvals"),
+                         [("facetide", "draft-1", "owner", "xiyue")])
+
     def test_companion_token_reaches_only_its_routes_and_its_own_bot(self):
         bind_identity(self.db, provider="telegram", bot_id="workbot", external_user_id="42", principal_id="owner")
         other_bot = {"provider": "telegram", "bot_id": "workbot", "external_user_id": "42"}

@@ -122,6 +122,11 @@ class WorkbenchApp:
             "/v1/approvals/decide": lambda: self.approvals.decide(
                 approver=self.actor(body), approval_id=body["approval_id"], approve=body.get("approve"),
                 source_ref=body.get("source_ref", "")),
+            "/v1/tools/record_approval": lambda: self.approvals.record_external(
+                approver=self.actor(body), recorded_by=str((body.get("identity") or {}).get("bot_id", "")),
+                system=body.get("system"), action=body.get("action"), subject_ref=body.get("subject_ref"),
+                payload_digest=body.get("payload_digest"), source_ref=body.get("source_ref"),
+                decided_at=body.get("decided_at"), issued_at=body.get("issued_at")),
             "/v1/approvals/consume": lambda: self.approvals.consume(
                 workspace_id=ws, tool_name=body["tool_name"], tool_input=body.get("tool_input"),
                 session_ref=body.get("session_ref", ""), task_id=body.get("task_id")),
@@ -223,7 +228,7 @@ class WorkbenchApp:
         return "viewer" if hmac.compare_digest(password, self.dashboard_token) else None
 
     COMPANION_ROUTES = frozenset({"/v1/tools/list_tasks", "/v1/tools/get_task", "/v1/tools/change_tasks",
-                                  "/v1/tools/whats_new", "/v1/companion/message"})
+                                  "/v1/tools/whats_new", "/v1/companion/message", "/v1/tools/record_approval"})
 
     def check_companion(self, header: str | None, path: str, body: dict) -> bool:
         """The companion token only reaches its routes, and only as its own bot (identity or inbound bot_id)."""
