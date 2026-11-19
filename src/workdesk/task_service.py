@@ -654,7 +654,7 @@ class _Batch:
             "official_due_at": _opt_utc(op.get("official_due_at"), "official_due_at"),
             "soft_due_at": _opt_utc(op.get("soft_due_at"), "soft_due_at"),
             "planned_start_at": _opt_utc(op.get("planned_start_at"), "planned_start_at"),
-            "project_id": self.project(op.get("project_id")), "requester_id": requester, "assignee_id": assignee,
+            "project_id": self.project(self.ref(op.get("project_id"))), "requester_id": requester, "assignee_id": assignee,
         }
         cols = ", ".join(values)
         self.c.execute(
@@ -682,7 +682,7 @@ class _Batch:
             elif key == "assignee_id":
                 value = self.member(value, "assignee_id", ("owner", "editor"))
             elif key == "project_id":
-                value = self.project(value or None)
+                value = self.project(self.ref(value) or None)
             else:
                 value = _text(value, key, required=(key == "title"))
             if value != task[key]:

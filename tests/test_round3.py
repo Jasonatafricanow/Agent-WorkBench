@@ -135,6 +135,10 @@ class Round3(Base):
         self.task(key="t2", project_id=p["project_id"])
         with self.assertRaises(InvalidOperation):
             self.task(key="t3", project_id="nope")
+        # A project made in the same batch is referenced by its batch ref.
+        out = self.apply(self.owner, "p2", {"op": "create_project", "ref": "np", "title": "Y", "evidence_type": "system"},
+                         {"op": "create_task", "title": "in Y", "project_id": "$np", "evidence_type": "system"})
+        self.assertEqual(self.q("SELECT project_id FROM tasks WHERE id=?", out[1]["task_id"])[0][0], out[0]["project_id"])
 
     def test_monthly_import_reconciles_without_touching_manual_fields(self):
         csv_text = "案号,名称,官方期限\nA-1,Alpha,2026-12-10\nA-2,Beta,2026-12-20\n"
