@@ -1,0 +1,31 @@
+# Example only — review paths, network and secrets before using on the NAS.
+services:
+  workbench:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    container_name: workbench
+    restart: unless-stopped
+    init: true
+    # Bind to the host loopback / Tailscale interface only; this is not an Internet API.
+    ports: ["127.0.0.1:8790:8790"]
+    volumes: ["/vol1/1000/personal-apps/data/workbench:/data"]
+    env_file: ["/vol1/1000/personal-apps/config/workbench.env"]   # WORKBENCH_HOST_TOKEN, WORKBENCH_DASHBOARD_*
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }
+
+  workbot:
+    # Reuses the Pi runtime image; a separate process, agent dir, sessions and Telegram token from the companion bot.
+    image: xiyue-pi-runtime:1.5.2-full
+    container_name: workbot
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    working_dir: /workbot/app
+    command: ["node", "gateway.mjs"]
+    volumes:
+      - "../host/pi-workbot:/workbot/app:ro"
+      - "/vol1/1000/personal-apps/data/workbot/agent:/workbot/agent"        # settings.json, auth.json, WORKBOT.md
+      - "/vol1/1000/personal-apps/data/workbot/workspace:/workbot/workspace" # chats, ledger.jsonl
+    environment:
+      WORKBOT_ENV_FILES: /workbot/agent/workbot.env
+      PI_RUNTIME: /opt/xiyue-runtime
+      WORKBENCH_URL: http://127.0.0.1:8790
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }
