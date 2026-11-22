@@ -635,16 +635,21 @@ class _Batch:
         task_id = self.s._new_id("task")
         if self.role == "requester":
             requester, assignee, state = self.actor.principal_id, self.owner_id, "INBOX"
-            if any(op.get(k) is not None for k in ("soft_due_at", "planned_start_at", "assignee_id", "state")):
+            if any(op.get(k) is not None for k in ("soft_due_at", "planned_start_at", "assignee_id", "state", "waiting_on")):
                 raise Forbidden("requesters cannot set internal planning fields")
         else:
             requester = op.get("requester_id")
             if requester is not None:
                 self.member(requester, "requester_id")
             assignee = self.member(op.get("assignee_id") or self.owner_id, "assignee_id", ("owner", "editor"))
-            state = op.get("state", "INBOX")
-            if state not in ("INBOX", "READY", "DOING"):
-                raise InvalidOperation("new tasks start in INBOX, READY or DOING", field="state", allowed=list(("INBOX", "READY", "DOING")))
+            # "Handed to X, I wait for their answer" in one op: waiting_on starts the task in WAITING.
+            state = op.get("state") or ("WAITING" if op.get("waiting_on") is not None else "INBOX")
+            if state == "WAITING" and op.get("waiting_on") is None:
+                raise InvalidOperation("a new task starts in WAITING only with waiting_on {awaited_outcome, "
+                                       "responsible_principal_id?}", field="waiting_on")
+            if state not in ("INBOX", "READY", "DOING", "WAITING"):
+                raise InvalidOperation("new tasks start in INBOX, READY or DOING (WAITING with waiting_on)",
+                                       field="state", allowed=list(("INBOX", "READY", "DOING", "WAITING")))
         priority = op.get("priority", 2)
         if type(priority) is not int or not 0 <= priority <= 4:
             raise InvalidOperation("priority must be 0..4", field="priority")
@@ -666,7 +671,18 @@ class _Batch:
         self.touched[task_id] = None
         self.bind(op, task_id)
         event_id = self.event(task_id, "created", op, evidence, after=values)
-        return {"task_id": task_id, "event_id": event_id}
+        result = {"task_id": task_id, "event_id": event_id}
+        if op.get("waiting_on") is not None:
+            result["dependency_id"] = self._wait_on(task_id, op, evidence)
+        return result
+
+    def _wait_on(self, task_id: str, op: dict, evidence: str) -> str:
+        """waiting_on {awaited_outcome, responsible_principal_id?} -> an open external_response dependency."""
+        wait = _obj(op.get("waiting_on"), "waiting_on")
+        dep = {"op": "add_dependency", "task_id": task_id, "kind": "external_response",
+               "awaited_outcome": wait.get("awaited_outcome"), "responsible_principal_id": wait.get("responsible_principal_id"),
+               **{k: op[k] for k in ("reason", "source_ref", "occurred_at") if op.get(k) is not None}}
+        return self.op_add_dependency(dep, evidence)["dependency_id"]
 
     def op_patch_task(self, op: dict, evidence: str) -> dict:
         task = self.task(op)
@@ -1069,10 +1085,13 @@ class _Batch:
             raise InvalidOperation(f"cannot move {current} -> {target}", field="to")
         if target in ("DONE", "CANCELLED") or current in ("DONE", "CANCELLED"):
             self.strong(op, evidence, f"{current} -> {target}", task)
+        if target == "WAITING" and op.get("waiting_on") is not None:
+            self._wait_on(task["id"], op, evidence)
         if target == "WAITING" and not self.c.execute(
                 "SELECT 1 FROM dependencies WHERE workspace_id=? AND task_id=? AND status='open'",
                 (self.ws, task["id"])).fetchone():
-            raise InvalidOperation("WAITING needs an open dependency (add_dependency first)")
+            raise InvalidOperation("WAITING needs an open dependency: pass waiting_on {awaited_outcome, "
+                                   "responsible_principal_id?} or add_dependency first")
         if target == "BLOCKED" and not _text(op.get("reason"), "reason"):
             raise InvalidOperation("BLOCKED needs a reason", field="reason")
         completed = self.now if target == "DONE" else (None if current == "DONE" else task["completed_at"])

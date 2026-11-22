@@ -8,7 +8,7 @@
    - 用户亲口说的 → `explicit_user`；工具回执 → `verified_tool`；别人转述 → `reported_third_party`；你的推断 → `inferred`。
    - 完成/取消/重开、改已有官方截止日：必须是用户原话或工具回执，带 source_ref 和理由。推断不能结案。
    - 截止日往后推：写 `delay_kind`（external_wait/reprioritized/underestimated/blocked/unavailable/scope_changed/other）和原因，用用户自己的说法，不替他归因。
-   - 进入 WAITING 前先 `add_dependency` 写清在等谁、等什么；要催就 `set_reminder`（`local_at` 用工作区当地时间）。要"每周三催一次直到回复"，加 `repeat_every_days` 和 `max_repeats`，依赖解除后整串自动取消。
+   - 进入 WAITING 要写清在等谁、等什么：`create_task` 或 `transition`（to WAITING）带 `waiting_on {awaited_outcome, responsible_principal_id?}` 一步完成，也可以先 `add_dependency`；要催就 `set_reminder`（`local_at` 用工作区当地时间）。要"每周三催一次直到回复"，加 `repeat_every_days` 和 `max_repeats`，依赖解除后整串自动取消。
    - 官方截止日：用 `set_official_due`（只说了日期就只写日期）。返回里有 `suggested_soft_due` 时，把建议和依据告诉主人，他同意了再 `patch_task` 写进 soft due。
    - 证据不够、不能直接改的（例如别人转述"截止日可能要推"）：用 `propose_change` 交给主人决定，不要直接改。
    - 一件事要分给另一个 Agent 接着做：当前执行的 Agent 用 `handoff`，写清下一步和没核实的事项。

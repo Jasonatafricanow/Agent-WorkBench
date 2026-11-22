@@ -82,3 +82,25 @@ class TaskLines(Base):
         self.assertEqual(first_day_steps[-1]["stages"][-1]["to_state"], "WAITING")
         later = views.timeline(self.db, actor=self.owner, start="2026-11-18T00:00:00Z", end="2026-11-19T00:00:00Z")
         self.assertTrue(later["lines"][0]["earlier"])
+
+
+class WaitingInOneOp(Base):
+    """11-21 Xiyue: '已交高老师处理，等她反馈' took three tries; it is one op now."""
+
+    def test_create_task_waiting_on_someone(self):
+        out = self.apply(self.owner, "c", {"op": "create_task", "title": "充电宝售后", "evidence_type": "explicit_user",
+                                           "waiting_on": {"awaited_outcome": "高老师反馈", "responsible_principal_id": "gao"}})[0]
+        self.assertEqual(self.q("SELECT state FROM tasks WHERE id=?", out["task_id"]), [("WAITING",)])
+        self.assertEqual(self.q("SELECT kind, responsible_principal_id, status FROM dependencies WHERE task_id=?", out["task_id"]),
+                         [("external_response", "gao", "open")])
+
+    def test_transition_to_waiting_with_waiting_on(self):
+        task = self.task()
+        self.apply(self.owner, "w", {"op": "transition", "task_id": task, "expected_version": 1, "to": "WAITING",
+                                     "waiting_on": {"awaited_outcome": "对方回复"}, "evidence_type": "explicit_user"})
+        self.assertEqual(self.q("SELECT state FROM tasks WHERE id=?", task), [("WAITING",)])
+
+    def test_waiting_without_saying_on_what_is_still_refused(self):
+        from workdesk.errors import InvalidOperation
+        with self.assertRaises(InvalidOperation):
+            self.apply(self.owner, "c", {"op": "create_task", "title": "x", "state": "WAITING", "evidence_type": "explicit_user"})
