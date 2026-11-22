@@ -283,7 +283,7 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
     from .dashboard import (render_calendar, render_dashboard, render_life, render_projects, render_task,
                             render_timeline)
     from contextlib import closing
-    from .owner_ui import assignable, csrf_value, new_task_form, notice, task_panel
+    from .owner_ui import assignable, csrf_value, notice, quick_add_form, task_panel
     from .storage import connect
     pages = {"/calendar", "/timeline", "/projects", "/life"}
 
@@ -323,10 +323,15 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
             owner = who == "owner"
             csrf = csrf_value(app.owner_token) if owner else ""
             try:
+                quick = ""
+                if owner and (route.startswith("/task/") or route in ("/", "/dashboard")):
+                    with closing(connect(app.db)) as conn:
+                        people = assignable(conn, actor.workspace_id)
+                    quick = quick_add_form(csrf, back=route if route.startswith("/task/") else "/", people=people)
                 if route.startswith("/task/"):
                     page = render_task(app.tasks, actor, app.db, route[len("/task/"):], now,
                                        owner_panel=(lambda t, slot, tz: task_panel(csrf, t, slot, tz)) if owner else None,
-                                       notice=notice(q) if owner else "")
+                                       notice=notice(q) if owner else "", owner_html=quick)
                 elif route == "/calendar":
                     page = render_calendar(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"),
                                            owner=owner, **narrow)
@@ -338,12 +343,8 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
                 elif route == "/life":
                     page = render_life(actor, app.db, now, app.life, owner=owner)
                 else:
-                    owner_html = ""
-                    if owner:
-                        with closing(connect(app.db)) as conn:
-                            people = assignable(conn, actor.workspace_id)
-                        owner_html = notice(q) + new_task_form(csrf, people=people)
-                    page = render_dashboard(app.tasks, actor, app.db, now, owner_html=owner_html)
+                    page = render_dashboard(app.tasks, actor, app.db, now, owner_html=quick,
+                                            notice=notice(q) if owner else "")
             except WorkbenchError as exc:
                 return self._send(404 if exc.code in ("NOT_FOUND", "FORBIDDEN") else 400, {"code": exc.code})
             self._send(200, page.encode("utf-8"), "text/html")

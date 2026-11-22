@@ -75,26 +75,27 @@ def assignable(conn, workspace_id: str) -> list[tuple[str, str]]:
            ORDER BY p.display_name""", (workspace_id,))]
 
 
-def new_task_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = ()) -> str:
-    """With `people`, the owner may hand the task to one of them: like sending a mail, the task stays on the
-    owner's board in WAITING until that person answers."""
+def quick_add_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = ()) -> str:
+    """The work page's one-line add: a title and who does it; the rest folds away. Handing it to someone works like
+    sending a mail: the task stays on the owner's board in WAITING until that person answers."""
     assign = ""
     if people:
         options = "".join(f"<option value='{e(pid)}'>指派给 {e(name)}</option>" for pid, name in people)
-        assign = (f"<select name=assign_to><option value=''>自己做</option>{options}</select>"
-                  "<input type=text name=ask placeholder='指派时：要对方做什么（可空，会发给对方）' maxlength=400>")
+        assign = f"<select name=assign_to aria-label='谁来做'><option value=''>自己做</option>{options}</select>"
     priorities = "".join(f"<option value={p}{' selected' if p == 2 else ''}>优先级 {p}</option>" for p in range(5))
+    ask = "<input type=text name=ask placeholder='指派时要对方做什么（会发给对方）' maxlength=400>" if people else ""
     return (
-        "<section class=owner><h2>新建任务（我自己的）</h2>"
-        f"<form method=post action=/owner/ops>{_hidden(csrf, back, action='create')}"
-        "<input type=text name=title placeholder='要做什么' required maxlength=200>"
-        "<input type=text name=next_action placeholder='下一步（可空）' maxlength=400>"
-        "<label class=meta>期望完成 <input type=datetime-local name=soft_due></label>"
+        f"<div class=quick><form method=post action=/owner/ops>{_hidden(csrf, back, action='create')}"
+        "<input type=text name=title placeholder='新建或指派：要做什么' required maxlength=200 aria-label='要做什么'>"
+        f"{assign}<button class=primary>记下</button>"
+        "<details><summary>更多：下一步、期望完成、状态、焦点</summary><div class=more>"
+        f"{ask}<input type=text name=next_action placeholder='下一步（可空）' maxlength=400>"
+        "<label>期望完成<input type=datetime-local name=soft_due></label>"
         f"<select name=priority>{priorities}</select>"
-        "<select name=state><option value=READY>可做</option><option value=DOING>马上做</option><option value=INBOX>先放收件箱</option></select>"
+        "<select name=state><option value=INBOX>先放收件箱</option><option value=READY>可做</option><option value=DOING>马上做</option></select>"
         "<select name=focus><option value=''>不设焦点</option><option value=NOW>设为 NOW</option>"
         "<option value=NEXT1>设为 NEXT1</option><option value=NEXT2>设为 NEXT2</option></select>"
-        f"{assign}<button class=primary>新建</button></form></section>")
+        "</div></details></form></div>")
 
 
 def _post(csrf: str, back: str, inner: str, **fields) -> str:
@@ -141,7 +142,7 @@ def task_panel(csrf: str, task: dict, focus_slot: str | None, tz: ZoneInfo) -> s
                  "<button>保存修改</button>", action="edit", **common)
     progress = _post(csrf, back, "<input type=text name=text placeholder='记一笔进展' required maxlength=1000>"
                                  "<button>记下</button>", action="progress", **common)
-    return (f"<section class=owner><h2>我来处理</h2><div class=row>{buttons}</div>{reasoned}"
+    return (f"<section class=owner><h2>处理</h2><div class=row>{buttons}</div>{reasoned}"
             f"<div class=meta>焦点</div><div class=row>{focus}</div>{edit}{progress}</section>")
 
 

@@ -45,6 +45,58 @@ table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:6px 4px;b
 .line .tag{font-weight:400}.line ol{list-style:none;margin:8px 0 0;padding:0 0 0 14px;border-left:2px solid var(--line)}
 .line .day{position:relative;padding:2px 0 8px}.line .day:before{content:"";position:absolute;left:-20px;top:8px;width:10px;height:10px;border-radius:50%;background:var(--card);border:2px solid var(--accent)}
 .line .day>b{font-size:13px;color:var(--accent)}.line .step{padding:3px 0 0;border:0}.line .step .when{color:var(--muted);font-variant-numeric:tabular-nums;margin-right:6px}
+main.wide{max-width:1360px}
+.mail{display:grid;grid-template-columns:320px minmax(0,1fr);background:var(--card);border:1px solid var(--line);border-radius:var(--pb-r-lg);min-height:calc(100vh - 190px);overflow:hidden}
+.rail{border-right:1px solid var(--line);padding:0 0 12px;max-height:calc(100vh - 190px);overflow:auto}
+.rail h4{display:flex;justify-content:space-between;font-size:12px;font-weight:600;color:var(--muted);margin:14px 16px 4px}
+.rail h4.bad{color:var(--pb-bad)}.rail h4 .n{font-family:var(--pb-mono);font-weight:400}
+.rail a.it{display:block;padding:7px 16px 7px 13px;border:0;border-left:3px solid transparent;color:inherit}
+.rail a.it:hover{background:var(--pb-hover)}
+.rail a.it .t{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail a.it .m{display:block;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail a.it.w .m{color:var(--warn)}.rail a.it.b .m{color:var(--pb-bad)}
+.rail a.it.sel{background:var(--pb-accent-soft);border-left-color:var(--accent)}
+.rail .none{font-size:12px;color:var(--muted);padding:2px 16px}
+.rail details.done summary{cursor:pointer;font-size:12px;color:var(--muted);margin:16px 16px 4px}
+.rail details.done a.it .t{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line)}
+.quick{padding:12px;border-bottom:1px solid var(--line);background:var(--bg)}
+.quick form{display:flex;flex-wrap:wrap;gap:6px;margin:0}
+.quick input,.quick select,.quick button{font:inherit;font-size:14px;height:34px;padding:0 10px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:var(--pb-r)}
+.quick input[name=title]{flex:1 1 100%}.quick select{flex:1 1 0;min-width:0}
+.quick button.primary{background:var(--accent);border-color:var(--accent);color:var(--pb-accent-ink);font-weight:600;cursor:pointer}
+.quick details{flex:1 1 100%;font-size:12px;color:var(--muted)}.quick details summary{cursor:pointer;padding:2px 0}
+.quick details .more{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.quick details .more>*{flex:1 1 140px}
+.quick label{display:flex;flex-direction:column;gap:2px}
+.pane{padding:22px 28px;border:0;border-radius:0;min-width:0}
+.pane .head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:12px}
+.pane h2{font-size:22px;color:var(--ink);margin:0 0 6px;font-weight:600}
+.pane .who{display:flex;flex-wrap:wrap;gap:4px 18px;font-size:13px;color:var(--muted)}.pane .who b{color:var(--ink);font-weight:600}
+.chips{display:flex;gap:6px}
+.chip{display:inline-block;font-size:12px;line-height:20px;padding:0 7px;border-radius:4px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.chip.do{color:var(--accent);border-color:var(--accent)}.chip.warn{color:var(--warn);border-color:var(--warn)}
+.chip.ok{color:var(--ok);border-color:var(--ok)}.chip.bad{color:var(--pb-bad);border-color:var(--pb-bad)}
+.rail .chip{font-size:11px;line-height:16px;padding:0 4px;margin-right:2px}
+.waitbox{display:flex;gap:14px;align-items:center;border:1px solid var(--warn);border-radius:var(--pb-r-lg);padding:12px 14px;margin:4px 0 18px}
+.waitbox .big{font:600 22px var(--pb-mono);color:var(--warn);white-space:nowrap}
+dl.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px 24px;margin:0 0 18px}
+dl.facts dt{font-size:12px;color:var(--muted)}dl.facts dd{margin:0}
+.sub-h{font-size:13px;color:var(--muted);font-weight:600;margin:20px 0 8px}
+ol.thread{list-style:none;margin:0;padding:0 0 0 22px;position:relative}
+ol.thread:before{content:"";position:absolute;left:6px;top:6px;bottom:6px;width:2px;background:var(--line)}
+ol.thread li.ev{position:relative;padding:0 0 14px;border:0}
+ol.thread li.ev:before{content:"";position:absolute;left:-21px;top:5px;width:10px;height:10px;border-radius:50%;background:var(--card);border:2px solid var(--accent)}
+ol.thread li.ev.w:before{border-color:var(--warn)}ol.thread li.ev.ok:before{border-color:var(--ok)}
+ol.thread li.ev.now:before{background:var(--warn);border-color:var(--warn)}
+ol.thread .when{font:12px var(--pb-mono);color:var(--muted)}ol.thread .what{font-weight:500}
+.slots{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
+.slots .slot{display:block;border:1px solid var(--line);border-radius:var(--pb-r);padding:8px 10px;color:inherit}
+.slots .slot b{display:block;font-size:12px;color:var(--accent)}.slots .slot.none{color:var(--muted)}
+.quiet{font-size:13px;color:var(--muted);border:1px dashed var(--line);border-radius:var(--pb-r);padding:10px 12px}
+section.alert{border-color:var(--warn);margin-bottom:10px}section.alert h3{font-size:14px;color:var(--warn);margin:0 0 6px}
+.pane section.owner h2{font-size:13px;color:var(--muted)}
+.pane section.owner{margin-top:22px;border-top:1px solid var(--line);border-radius:0;border-left:0;border-right:0;border-bottom:0;padding:16px 0 0}
+@media (max-width:860px){.mail{display:flex;flex-direction:column;min-height:0}.rail{border-right:0;border-bottom:1px solid var(--line);max-height:none}
+  .mail.has-sel .pane{order:-1;border-bottom:1px solid var(--line)}.pane{padding:16px}.slots{grid-template-columns:1fr}main{padding:12px}}
 """
 
 NAV = (("work", "/", "工作台"), ("calendar", "/calendar", "日历"), ("timeline", "/timeline", "时间线"),
@@ -118,12 +170,13 @@ def _list(items, render, empty="（无）") -> str:
     return "<ul>" + "".join(f"<li>{render(i)}</li>" for i in items) + "</ul>"
 
 
-def _page(title: str, active: str, body: str, now: str, tz: ZoneInfo, *, sub: str = "", owner: bool = False) -> str:
+def _page(title: str, active: str, body: str, now: str, tz: ZoneInfo, *, sub: str = "", owner: bool = False,
+          wide: bool = False) -> str:
     tabs = "".join(f"<a href='{href}' class='{'on' if key == active else ''}'>{label}</a>" for key, href, label in NAV)
     stamp = _local(now, tz, "%Y-%m-%d %H:%M")
     return (f"<!doctype html><html lang=zh-CN><head><meta charset=utf-8>"
             f"<meta name=viewport content='width=device-width,initial-scale=1'><title>{e(title)}</title>"
-            f"<style>{PB_CSS}{CSS}{FORM_CSS if owner else ''}</style></head><body>{hub('workbench')}<main><h1>{e(title)}</h1>"
+            f"<style>{PB_CSS}{CSS}{FORM_CSS if owner else ''}</style></head><body>{hub('workbench')}<main{' class=wide' if wide else ''}><h1>{e(title)}</h1>"
             f"<div class=sub>{'主人模式' if owner else '只读视图'} · {stamp}{' · ' + sub if sub else ''}</div><nav>{tabs}</nav>{body}</main></body></html>")
 
 
@@ -164,66 +217,211 @@ def _event_line(ev, tz, names) -> str:
 
 
 # ----------------------------------------------------------------------------------- Work
-def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str = "") -> str:
+# Direction C「往来」(2026-11-22): like a mail client. Left, every open task grouped by whose hands it is in
+# (me / a person / an outside condition / the inbox); right, the selected task's whole line and what can be done
+# with it, or, with nothing selected, what needs attention today. /task/<id> is the same page with that task open.
+def _age(ts: str | None, now: str) -> str:
+    if not ts:
+        return ""
+    try:
+        then = datetime.fromisoformat(ts[:-1] + "+00:00" if ts.endswith("Z") else ts)
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=timezone.utc)
+        sec = (datetime.fromisoformat(now[:-1] + "+00:00") - then).total_seconds()
+    except ValueError:
+        return ""
+    if sec < 3600:
+        return f"{max(1, int(sec // 60))} 分钟"
+    if sec < 86400 * 2:
+        return f"{int(sec // 3600)} 小时"
+    return f"{int(sec // 86400)} 天"
+
+
+def _holder(deps, actor, names) -> str | None:
+    """Whose answer an open wait is for: a person's name, or None for an outside condition. Waits recorded
+    before the person was a member carry no responsible id; an outcome that starts with their name still counts."""
+    people = {pid: n for pid, n in names.items() if pid != actor.principal_id and n}
+    for d in deps:
+        who = d.get("responsible_principal_id")
+        if who in people:
+            return people[who]
+        for n in people.values():
+            if (d.get("awaited_outcome") or "").startswith(n):
+                return n
+    return None
+
+
+def _rail(ov, actor, names, tz, now, selected, quick_add) -> str:
+    slot_of = {t["id"]: s for s, t in ov["focus"].items() if t}
+
+    def item(t, meta, cls=""):
+        sel = " sel" if t["id"] == selected else ""
+        slot = f"<span class='chip do'>{e(slot_of[t['id']])}</span> " if t["id"] in slot_of else ""
+        return (f"<a class='it{cls}{sel}' href='/task/{e(t['id'])}'><span class=t>{slot}{e(t['title'])}</span>"
+                f"<span class=m>{meta}</span></a>")
+
+    def due_or_age(t):
+        soft = _local(t.get("soft_due_at"), tz, "%m-%d")
+        due = t.get("official_due_local") or _local(t.get("official_due_at"), tz, "%m-%d")
+        if due:
+            return f"官方截止 {e(due)}"
+        return f"期望 {e(soft)}" if soft else f"{_age(t.get('created_at'), now)}前记下"
+
+    groups: list[tuple[str, str, list[str]]] = []
+    mine = ov["doing"] + ov["ready"]
+    groups.append(("我在做", "", [item(t, f"{STATE_LABELS.get(t['state'], '')} · {due_or_age(t)}") for t in mine]))
+    by_person: dict[str, list[str]] = {}
+    outside: list[str] = []
+    for t in ov["waiting"]:
+        since = min((d.get("created_at") or "" for d in t.get("waiting_on", [])), default="") or t.get("updated_at")
+        holder = _holder(t.get("waiting_on", []), actor, names)
+        if holder:
+            by_person.setdefault(holder, []).append(item(t, f"等{e(holder)}回复 · {_age(since, now)}", " w"))
+        else:
+            what = "；".join(e(d["awaited_outcome"]) for d in t.get("waiting_on", [])) or "等待中"
+            outside.append(item(t, f"等{what} · {_age(since, now)}", " w"))
+    for person, rows in by_person.items():
+        groups.append((f"在{e(person)}手上", "", rows))
+    if outside:
+        groups.append(("等外部条件", "", outside))
+    if ov["blocked"]:
+        groups.append(("阻塞", " bad", [item(t, e(t.get("next_action") or "阻塞中"), " b") for t in ov["blocked"]]))
+    if ov["overdue"]:
+        groups.append(("逾期", " bad", [item(t, due_or_age(t), " b") for t in ov["overdue"]]))
+    groups.append(("收件箱", "", [item(t, due_or_age(t)) for t in ov["inbox"]]))
+
+    html = [quick_add]
+    for title, cls, rows in groups:
+        body = "".join(rows) or "<div class=none>（空）</div>"
+        html.append(f"<h4 class='g{cls}'><span>{title}</span><span class=n>{len(rows)}</span></h4>{body}")
+    done = "".join(item(t, "完成") for t in ov["recently_done"])
+    if done:
+        html.append(f"<details class=done><summary>最近 7 天完成 {len(ov['recently_done'])} 件</summary>{done}</details>")
+    return "<aside class=rail>" + "".join(html) + "</aside>"
+
+
+def _today_pane(ov, recent, stuck, load, tz, names) -> str:
+    focus = [(s, ov["focus"].get(s)) for s in ("NOW", "NEXT1", "NEXT2")]
+    if any(t for _, t in focus):
+        slots = "".join(f"<a class=slot href='/task/{e(t['id'])}'><b>{s}</b>{e(t['title'])}</a>" if t else
+                        f"<div class='slot none'><b>{s}</b>空</div>" for s, t in focus)
+        focus_html = f"<div class=slots>{slots}</div>"
+    else:
+        focus_html = "<p class=quiet>还没有放进 NOW 的事。从左边点开一件，在下面设为 NOW。</p>"
+    attention = [
+        ("待审批", ov["my_approvals"], lambda a: f"{e(a['request_summary'])}<div class=meta>/approve {e(a['id'])}"
+                                              f"{' · 到期 ' + _local(a['expires_at'], tz) if a['expires_at'] else ''}</div>"),
+        ("结果不明、需要核对", ov["unknown_outcomes"], lambda u: f"{e(u['kind'])} · {e(u['id'])}"
+                                                         f"<div class=meta>{_local(u['updated_at'], tz)}</div>"),
+        ("需要我处理", ov["my_human_actions"], lambda h: f"{e(h['title'])}<div class=meta>{e(h['request_kind'])} · "
+                                                    f"{e(h['urgency'])}{' · 截止 ' + _local(h['due_at'], tz) if h['due_at'] else ''}</div>"),
+        ("承诺", ov["commitments_open"], lambda c: f"{e(c['promise_text'])}<div class=meta>"
+                                                  f"{'我欠' if c['direction'] == 'owner_owes' else '欠我' if c['direction'] == 'owed_to_owner' else '他人'}"
+                                                  f" · {e(c.get('due_local') or _local(c['due_at'], tz))}</div>"),
+        ("交付物", ov["deliverables_pending"], lambda d: f"{e(d['title'])}<div class=meta>{e(d['status'])} · 第 {d['revision']} 版</div>"),
+        ("即将催促 / 提醒", ov["upcoming_followups"], lambda r: f"<a href='/task/{e(r['task_id'])}'>{e(r['title'])}</a>"
+                                                       f"<div class=meta>{_local(r['due_at'], tz)} · 给 {e(names.get(r['recipient_principal_id'], ''))}</div>"),
+        ("停滞与反复延期", stuck, lambda s: f"{e(s['title'])}<div class=meta>延期 {len(s['delays'])} 次</div>"),
+        ("排期过载的日子", [d for d in load["days"] if d["overloaded"]],
+         lambda d: f"{e(d['date'])}<div class=meta>工作量 {d['load']} 项</div>"),
+        ("排期建议（只动期望完成，需你确认）", load.get("suggestions", []),
+         lambda s: f"<a href='/task/{e(s['task_id'])}'>{e(s['title'])}</a><div class=meta>{e(s['from'])} → {e(s['to'])} · {e(s['basis'])}</div>"),
+    ]
+    full = [(t, items, r) for t, items, r in attention if items]
+    quiet = [t for t, items, _ in attention if not items]
+    alerts = "".join(f"<section class=alert><h3>{t}</h3>{_list(items, r)}</section>" for t, items, r in full)
+    calm = f"<p class=quiet>今天没有：{'、'.join(quiet)}。</p>" if quiet else ""
+    changes = _list(recent[:12], lambda ev: (
+        f"<a href='/task/{e(ev['task_id'])}'>{e(ev['title'])}</a> · {KIND_LABELS.get(ev['kind'], e(ev['kind']))}"
+        f"<div class=meta>{_local(ev['at'], tz)}{' · ' + e(ev['reason']) if ev.get('reason') else ''}</div>"),
+        empty="三天里没有新变化")
+    return (f"<div class=head><h2>今天</h2></div>{focus_html}{alerts}{calm}"
+            f"<h3 class=sub-h>最近三天的变化</h3>{changes}")
+
+
+SOURCE_WORDS = (("tg://", "Telegram"), ("owner-web:", "网页工作台"), ("claude-code:", "Claude Code"),
+                ("xiyue-automation:", "溪月定时任务"), ("xiyue_todo", "溪月旧待办"))
+
+
+def _source_word(ref: str | None) -> str:
+    for prefix, word in SOURCE_WORDS:
+        if ref and ref.startswith(prefix):
+            return word
+    return ""
+
+
+def _task_pane(view, actor, names, tz, now, panel) -> str:
+    t = view["task"]
+    open_deps = [d for d in view["dependencies"] if d.get("status") == "open"]
+    holder = _holder(open_deps, actor, names)
+    state = STATE_LABELS.get(t["state"], t["state"])
+    chip = {"WAITING": "warn", "DOING": "do", "READY": "do", "DONE": "ok", "BLOCKED": "bad"}.get(t["state"], "")
+    focus = f"<span class='chip do'>{e(view['focus'][0])}</span>" if view.get("focus") else ""
+    first_src = next((ev["source_ref"] for ev in view["events"] if ev.get("source_ref")), "")
+    who = [("负责", holder or "我"), ("请求", names.get(t["requester_id"], "")), ("来自", _source_word(first_src))]
+    who_html = "".join(f"<span>{k} <b>{e(v)}</b></span>" for k, v in who if v)
+    wait = ""
+    if t["state"] == "WAITING" and open_deps:
+        since = min(d["created_at"] for d in open_deps)
+        what = "；".join(e(d["awaited_outcome"]) for d in open_deps)
+        wait = (f"<div class=waitbox><span class=big>{_age(since, now)}</span><div><b>等{what}</b>"
+                f"<div class=meta>{_local(since, tz)} 开始等{' · 工作 bot 上线后会自动提醒对方' if holder else ''}</div></div></div>")
+    facts = [("下一步", t["next_action"]), ("目标", t["goal"]), ("期望完成", _local(t["soft_due_at"], tz)),
+             ("官方截止", t.get("official_due_local") or _local(t["official_due_at"], tz)), ("已做", t["done_summary"]),
+             ("优先级", t.get("priority"))]
+    facts_html = "".join(f"<div><dt>{k}</dt><dd>{e(v)}</dd></div>" for k, v in facts if v not in (None, ""))
+    steps = []
+    for ev in view["events"]:
+        cls = " w" if ev["kind"] in ("dependency_added", "human_action_requested") else ""
+        cls = " ok" if ev["kind"] in ("dependency_resolved", "human_action_responded", "deliverable_accepted") else cls
+        src = _source_word(ev.get("source_ref"))
+        steps.append(f"<li class='ev{cls}'><div class=when>{_local(ev['occurred_at'], tz)} · "
+                     f"{e(names.get(ev['actor_id'], ev['actor_id']))}{' · ' + src if src else ''}</div>"
+                     f"<div class=what>{KIND_LABELS.get(ev['kind'], e(ev['kind']))}"
+                     f"{'：' + e(ev['reason']) if ev['reason'] else ''}</div></li>")
+    if t["state"] == "WAITING" and open_deps:
+        steps.append("<li class='ev now'><div class=when>现在</div><div class=what>还没有回音</div></li>")
+    chk = view.get("latest_checkpoint")
+    bookmark = (f"<h3 class=sub-h>工作书签</h3><p>{e(chk['next_action'])}</p><div class=meta>已完成 "
+                f"{e(', '.join(json.loads(chk['completed_steps_json'])))} · 未核实 {e(', '.join(json.loads(chk['unverified_json'])))}</div>"
+                if chk else "")
+    return (f"<div class=head><div><h2>{e(t['title'])}</h2><div class=who>{who_html}</div></div>"
+            f"<div class=chips>{focus}<span class='chip {chip}'>{e(state)}</span></div></div>{wait}"
+            f"{'<dl class=facts>' + facts_html + '</dl>' if facts_html else ''}"
+            f"<h3 class=sub-h>经过</h3><ol class=thread>{''.join(steps)}</ol>{bookmark}{panel}")
+
+
+def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str = "", selected: str | None = None,
+                     owner_panel=None, notice: str = "") -> str:
+    """owner_html: the owner's quick-add form (empty on the read-only view). With `selected`, the right pane is
+    that task; owner_panel(task, focus_slot, tz) -> its owner forms, or None on the read-only view."""
     tz, names = _ctx(actor, database)
     ov = tasks.overview(actor=actor, limit=30)
-    since = (datetime.fromisoformat(now[:-1]) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    recent = [i for i in views.timeline(database, actor=actor, start=since, end=_plus_seconds(now, 1), limit=40)["items"]
-              if i["type"] == "task_event"]
-    stuck = stagnation(database, actor=actor, now=now)
-    load = schedule_load(database, actor=actor, now=now)
+    title = "工作台"
+    if selected:
+        view = tasks.read(actor=actor, task_id=selected)
+        panel = ""
+        if owner_panel is not None:
+            slot = view["focus"][0] if view.get("focus") else None
+            panel = owner_panel(dict(view["task"]), slot, tz)
+        right = _task_pane(view, actor, names, tz, now, panel)
+    else:
+        since = (datetime.fromisoformat(now[:-1]) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent = [i for i in views.timeline(database, actor=actor, start=since, end=_plus_seconds(now, 1), limit=40)["items"]
+                  if i["type"] == "task_event"]
+        right = _today_pane(ov, recent, stagnation(database, actor=actor, now=now),
+                            schedule_load(database, actor=actor, now=now), tz, names)
+    body = (f"<div class='mail{' has-sel' if selected else ''}'>{_rail(ov, actor, names, tz, now, selected, owner_html)}"
+            f"<section class=pane>{notice}{right}</section></div>")
+    return _page(title, "work", body, now, tz, owner=bool(owner_html) or owner_panel is not None, wide=True)
 
-    def task_line(t):
-        due = t.get("official_due_local") or _local(t.get("official_due_at"), tz)
-        soft = _local(t.get("soft_due_at"), tz)
-        bits = [f"官方 {e(due)}" if due else "", f"soft {e(soft)}" if soft else "", e(t.get("next_action"))]
-        return f"<a href='/task/{e(t['id'])}'>{e(t['title'])}</a><div class=meta>{' · '.join(b for b in bits if b)}</div>"
 
-    def focus_slot(name, t):
-        body = task_line(t) if t else '<span class="empty">空</span>'
-        return f'<div class="slot"><b>{name}</b>{body}</div>'
-
-    def waiting_line(t):
-        on = "；".join(f"{e(d['awaited_outcome'])}（{e(names.get(d['responsible_principal_id'], '—'))}）"
-                      for d in t.get("waiting_on", []))
-        return f"<a href='/task/{e(t['id'])}'>{e(t['title'])}</a><div class=meta>等：{on or '—'}</div>"
-
-    sections = [
-        ("待审批", _list(ov["my_approvals"], lambda a: f"{e(a['request_summary'])}<div class=meta>/approve {e(a['id'])}"
-                                                    f"{' · 到期 ' + _local(a['expires_at'], tz) if a['expires_at'] else ''}</div>",
-                         empty="没有")),
-        ("结果不明、需要核对", _list(ov["unknown_outcomes"], lambda u: f"{e(u['kind'])} · {e(u['id'])}"
-                                                               f"<div class=meta>{_local(u['updated_at'], tz)}</div>", empty="没有")),
-        ("需要我处理（Human Inbox）", _list(ov["my_human_actions"], lambda h: f"{e(h['title'])}<div class=meta>"
-                                                                    f"{e(h['request_kind'])} · {e(h['urgency'])}"
-                                                                    f"{' · 截止 ' + _local(h['due_at'], tz) if h['due_at'] else ''}</div>")),
-        ("新进来的（INBOX）", _list(ov["inbox"], task_line)),
-        ("进行中 / 可做", _list(ov["doing"] + ov["ready"], task_line)),
-        ("等待中", _list(ov["waiting"], waiting_line)),
-        ("阻塞", _list(ov["blocked"], task_line)),
-        ("逾期", _list(ov["overdue"], lambda t: f'<span class="warn">{task_line(t)}</span>')),
-        ("承诺", _list(ov["commitments_open"], lambda c: f"{e(c['promise_text'])}<div class=meta>"
-                                                          f"{'我欠' if c['direction'] == 'owner_owes' else '欠我' if c['direction'] == 'owed_to_owner' else '他人'}"
-                                                          f" · {e(c.get('due_local') or _local(c['due_at'], tz))}</div>")),
-        ("交付物", _list(ov["deliverables_pending"], lambda d: f"{e(d['title'])}<div class=meta>{e(d['status'])} · 第 {d['revision']} 版</div>")),
-        ("最近完成（7 天）", _list(ov["recently_done"], task_line)),
-        ("即将催促/提醒", _list(ov["upcoming_followups"], lambda r: f"<a href='/task/{e(r['task_id'])}'>{e(r['title'])}</a>"
-                                                         f"<div class=meta>{_local(r['due_at'], tz)} · 给 {e(names.get(r['recipient_principal_id'], ''))}"
-                                                         f"{' · 还会重复 ' + str(r['repeats_left']) + ' 次' if r['repeats_left'] else ''}</div>")),
-        ("最近变化（3 天）", _list(recent, lambda ev: _event_line(ev, tz, names), empty="没有新变化")),
-        ("停滞与反复延期", _list(stuck, lambda s: f"{e(s['title'])}<div class=meta>延期 {len(s['delays'])} 次"
-                                                f"{' · 等待自 ' + _local(s['waiting_since'], tz) if s['waiting_since'] else ''}</div>")),
-        ("排期过载的日子", _list([d for d in load["days"] if d["overloaded"]],
-                              lambda d: f"{e(d['date'])}<div class=meta>工作量 {d['load']} 项</div>", empty="没有")),
-        ("排期建议（只动 soft due，需你确认）", _list(load.get("suggestions", []),
-                                         lambda s: f"<a href='/task/{e(s['task_id'])}'>{e(s['title'])}</a>"
-                                                   f"<div class=meta>{e(s['from'])} → {e(s['to'])} · {e(s['basis'])}</div>",
-                                         empty="没有")),
-    ]
-    focus = "".join(focus_slot(n, ov["focus"].get(n)) for n in ("NOW", "NEXT1", "NEXT2"))
-    body = f"{owner_html}<div class=focus>{focus}</div><div class=grid>" + "".join(
-        f"<section><h2>{title}</h2>{content}</section>" for title, content in sections) + "</div>"
-    return _page("工作台", "work", body, now, tz, owner=bool(owner_html))
+# ----------------------------------------------------------------------------------- Task
+def render_task(tasks, actor, database: str, task_id: str, now: str, *, owner_panel=None, notice: str = "",
+                owner_html: str = "") -> str:
+    """The work page with this task open on the right."""
+    return render_dashboard(tasks, actor, database, now, owner_html=owner_html, selected=task_id,
+                            owner_panel=owner_panel, notice=notice)
 
 
 # ------------------------------------------------------------------------------- Calendar
@@ -391,34 +589,3 @@ def render_life(actor, database: str, now: str, adapter, *, owner: bool = False)
     body = f"<div class=grid>{wheel}{axes}<section><h2>长期目标</h2>{goals}</section></div>"
     sub = "来源：Facetide（只读）" + (f" · {notes[status]}" if notes[status] else f" · 更新于 {_local(state['fetched_at'], tz)}")
     return _page("生活", "life", body, now, tz, sub=sub, owner=owner)
-
-
-# ----------------------------------------------------------------------------------- Task
-def render_task(tasks, actor, database: str, task_id: str, now: str, *, owner_panel=None, notice: str = "") -> str:
-    """owner_panel(task, focus_slot, tz) -> HTML of the owner's forms, or None for the read-only page."""
-    tz, names = _ctx(actor, database)
-    view = tasks.read(actor=actor, task_id=task_id)
-    t = view["task"]
-    panel = ""
-    if owner_panel is not None:
-        with closing(connect(database)) as conn:
-            row = conn.execute("SELECT slot FROM task_focus WHERE workspace_id=? AND task_id=?",
-                               (actor.workspace_id, t["id"])).fetchone()
-        panel = owner_panel(dict(t), row["slot"] if row else None, tz)
-    facts = [("状态", STATE_LABELS.get(t["state"], t["state"])), ("下一步", t["next_action"]), ("目标", t["goal"]),
-             ("官方截止", t.get("official_due_local") or _local(t["official_due_at"], tz)),
-             ("soft due", _local(t["soft_due_at"], tz)), ("已做", t["done_summary"]),
-             ("请求人", names.get(t["requester_id"], "")), ("版本", t["version"])]
-    rows = "".join(f"<li><b>{k}</b> {e(v)}</li>" for k, v in facts if v)
-    events = _list(list(reversed(view["events"])), lambda ev: (
-        f"{KIND_LABELS.get(ev['kind'], e(ev['kind']))}{'：' + e(ev['reason']) if ev['reason'] else ''}"
-        f"<div class=meta>{_local(ev['occurred_at'], tz)} · {e(names.get(ev['actor_id'], ev['actor_id']))}"
-        f" · {e(ev['evidence_type'])}{' · ' + e(ev['source_ref']) if ev['source_ref'] else ''}</div>"))
-    deps = _list(view["dependencies"], lambda d: f"{e(d['awaited_outcome'])}<div class=meta>{e(d['status'])}"
-                                              f" · {e(names.get(d['responsible_principal_id'], ''))}</div>")
-    chk = view.get("latest_checkpoint")
-    checkpoint = (f"{e(chk['next_action'])}<div class=meta>已完成 {e(', '.join(json.loads(chk['completed_steps_json'])))}"
-                  f" · 未核实 {e(', '.join(json.loads(chk['unverified_json'])))}</div>") if chk else '<p class="empty">（无）</p>'
-    body = (f"{notice}{panel}<div class=grid><section><h2>概况</h2><ul>{rows}</ul></section><section><h2>在等</h2>{deps}</section>"
-            f"<section><h2>工作书签</h2>{checkpoint}</section><section><h2>历史</h2>{events}</section></div>")
-    return _page(t["title"], "work", body, now, tz, owner=owner_panel is not None)
