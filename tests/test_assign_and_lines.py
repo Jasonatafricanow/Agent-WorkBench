@@ -16,7 +16,7 @@ class AssignTests(test_owner_console.OwnerConsoleTests):
                                         ask="帮忙联系客服换货", **extra))
 
     def test_assigned_task_waits_on_the_person_and_queues_their_message(self):
-        self.assertIn("指派给 Gao", self.get("/", self.owner_auth))
+        self.assertIn("<option value='Gao'>", self.get("/", self.owner_auth))  # suggested, not required
         status, location = self.assign()
         self.assertIn("ok=", location)
         (task, state), = self.q("SELECT id, state FROM tasks WHERE title='充电宝售后'")
@@ -42,6 +42,46 @@ class AssignTests(test_owner_console.OwnerConsoleTests):
         self.assertIn("err=", location)
         self.assertEqual(self.q("SELECT id FROM tasks WHERE title='充电宝售后'"), [])
         self.assertEqual(self.q("SELECT COUNT(*) FROM delivery_outbox")[0][0], 0)
+
+    def test_anyone_can_hold_a_task_without_being_a_member_or_reachable(self):
+        """Things first, then people, automation last: 路人甲 just holds it; nobody gets messaged."""
+        status, location = self.post_form(self.form(nonce="h1", action="create", title="寄修耳机", holder="路人甲",
+                                                    ask="修好寄回"))
+        self.assertIn("ok=", location)
+        (task, state), = self.q("SELECT id, state FROM tasks WHERE title='寄修耳机'")
+        self.assertEqual(state, "WAITING")
+        self.assertEqual(self.q("SELECT holder_name, responsible_principal_id, status FROM dependencies WHERE task_id=?", task),
+                         [("路人甲", None, "open")])
+        self.assertEqual(self.q("SELECT COUNT(*) FROM delivery_outbox")[0][0], 0)
+        self.assertIn("在路人甲手上", self.get("/", self.owner_auth))
+
+    def test_a_members_name_counts_as_that_member(self):
+        self.post_form(self.form(nonce="h2", action="create", title="充电宝售后", holder="Gao"))
+        (task,), = self.q("SELECT id FROM tasks WHERE title='充电宝售后'")
+        self.assertEqual(self.q("SELECT holder_name, responsible_principal_id FROM dependencies WHERE task_id=?", task),
+                         [("Gao", "gao")])
+        self.assertEqual(self.q("SELECT recipient_principal_id FROM delivery_outbox WHERE task_id=?", task), [("gao",)])
+
+    def test_hand_over_change_holder_and_take_back(self):
+        self.post_form(self.form(nonce="c1", action="create", title="装书架", state="INBOX"))
+        (task, version), = self.q("SELECT id, version FROM tasks WHERE title='装书架'")
+        status, location = self.post_form(self.form(nonce="c2", action="handoff", task_id=task, version=str(version),
+                                                    state="INBOX", cancel="", holder="师傅", title="装书架"))
+        self.assertIn("ok=", location)
+        self.assertEqual(self.q("SELECT state FROM tasks WHERE id=?", task), [("WAITING",)])
+        (dep,), = self.q("SELECT id FROM dependencies WHERE task_id=? AND status='open'", task)
+        (version,), = self.q("SELECT version FROM tasks WHERE id=?", task)
+        self.post_form(self.form(nonce="c3", action="handoff", task_id=task, version=str(version), state="WAITING",
+                                 cancel=dep, holder="物业", title="装书架"))
+        self.assertEqual(self.q("SELECT holder_name FROM dependencies WHERE task_id=? AND status='open'", task), [("物业",)])
+        self.assertIn("在物业手上", self.get(f"/task/{task}", self.owner_auth))
+        (dep,), = self.q("SELECT id FROM dependencies WHERE task_id=? AND status='open'", task)
+        (version,), = self.q("SELECT version FROM tasks WHERE id=?", task)
+        status, location = self.post_form(self.form(nonce="c4", action="takeback", task_id=task, version=str(version),
+                                                    cancel=dep))
+        self.assertIn("ok=", location)
+        self.assertEqual(self.q("SELECT state FROM tasks WHERE id=?", task), [("READY",)])
+        self.assertEqual(self.q("SELECT COUNT(*) FROM dependencies WHERE task_id=? AND status='open'", task), [(0,)])
 
     def test_owner_pages_say_owner_mode_viewer_pages_say_read_only(self):
         self.assertIn("主人模式", self.get("/timeline", self.owner_auth))

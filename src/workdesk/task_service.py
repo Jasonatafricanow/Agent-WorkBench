@@ -271,7 +271,7 @@ class SqliteTaskService:
             waiting = tasks("state='WAITING'")
             for task in waiting:
                 task["waiting_on"] = [dict(r) for r in conn.execute(
-                    """SELECT id,kind,awaited_outcome,responsible_principal_id,created_at
+                    """SELECT id,kind,awaited_outcome,responsible_principal_id,holder_name,created_at
                        FROM dependencies WHERE workspace_id=? AND task_id=? AND status='open'""",
                     (ws, task["id"]))]
             return {
@@ -677,10 +677,11 @@ class _Batch:
         return result
 
     def _wait_on(self, task_id: str, op: dict, evidence: str) -> str:
-        """waiting_on {awaited_outcome, responsible_principal_id?} -> an open external_response dependency."""
+        """waiting_on {awaited_outcome, responsible_principal_id?, holder_name?} -> an open external_response dependency."""
         wait = _obj(op.get("waiting_on"), "waiting_on")
         dep = {"op": "add_dependency", "task_id": task_id, "kind": "external_response",
                "awaited_outcome": wait.get("awaited_outcome"), "responsible_principal_id": wait.get("responsible_principal_id"),
+               "holder_name": wait.get("holder_name"),
                **{k: op[k] for k in ("reason", "source_ref", "occurred_at") if op.get(k) is not None}}
         return self.op_add_dependency(dep, evidence)["dependency_id"]
 
@@ -1173,11 +1174,15 @@ class _Batch:
         if related is not None:
             self.s._visible_task(self.c, self.actor, self.role, related)
         dep_id = self.s._new_id("dep")
+        holder = _text(op.get("holder_name"), "holder_name")[:80] or None
+        if holder is None and responsible is not None:
+            row = self.c.execute("SELECT display_name FROM principals WHERE id=?", (responsible,)).fetchone()
+            holder = row["display_name"] if row else None
         values = {"kind": kind, "awaited_outcome": _text(op.get("awaited_outcome"), "awaited_outcome", required=True),
-                  "responsible_principal_id": responsible, "related_task_id": related}
+                  "responsible_principal_id": responsible, "related_task_id": related, "holder_name": holder}
         self.c.execute(
             """INSERT INTO dependencies(id,workspace_id,task_id,kind,awaited_outcome,
-                 responsible_principal_id,related_task_id,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                 responsible_principal_id,related_task_id,holder_name,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
             (dep_id, self.ws, task["id"], *values.values(), self.now))
         self.bind(op, dep_id)
         return {"task_id": task["id"], "dependency_id": dep_id,

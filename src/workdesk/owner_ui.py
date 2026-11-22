@@ -75,15 +75,19 @@ def assignable(conn, workspace_id: str) -> list[tuple[str, str]]:
            ORDER BY p.display_name""", (workspace_id,))]
 
 
-def quick_add_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = ()) -> str:
+def _who_input(people, recent, placeholder: str) -> str:
+    names = list(dict.fromkeys([n for _, n in people] + list(recent)))
+    options = "".join(f"<option value='{e(n)}'>" for n in names)
+    return (f"<input type=text name=holder list=wb-holders maxlength=80 placeholder='{e(placeholder)}' aria-label='谁来做'>"
+            f"<datalist id=wb-holders>{options}</datalist>")
+
+
+def quick_add_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = (), recent: list[str] = ()) -> str:
     """The work page's one-line add: a title and who does it; the rest folds away. Handing it to someone works like
     sending a mail: the task stays on the owner's board in WAITING until that person answers."""
-    assign = ""
-    if people:
-        options = "".join(f"<option value='{e(pid)}'>指派给 {e(name)}</option>" for pid, name in people)
-        assign = f"<select name=assign_to aria-label='谁来做'><option value=''>自己做</option>{options}</select>"
+    assign = _who_input(people, recent, "交给谁（空着=自己做）")
     priorities = "".join(f"<option value={p}{' selected' if p == 2 else ''}>优先级 {p}</option>" for p in range(5))
-    ask = "<input type=text name=ask placeholder='指派时要对方做什么（会发给对方）' maxlength=400>" if people else ""
+    ask = "<input type=text name=ask placeholder='交给别人时：要对方做什么' maxlength=400>"
     return (
         f"<div class=quick><form method=post action=/owner/ops>{_hidden(csrf, back, action='create')}"
         "<input type=text name=title placeholder='新建或指派：要做什么' required maxlength=200 aria-label='要做什么'>"
@@ -140,10 +144,57 @@ def task_panel(csrf: str, task: dict, focus_slot: str | None, tz: ZoneInfo) -> s
                  f"<select name=delay_kind><option value=''>（往后推时选原因）</option>{delay}</select>"
                  "<input type=text name=reason placeholder='往后推的原因' maxlength=400>"
                  "<button>保存修改</button>", action="edit", **common)
-    progress = _post(csrf, back, "<input type=text name=text placeholder='记一笔进展' required maxlength=1000>"
+    progress = _post(csrf, back, "<input type=text name=text placeholder='记一笔进展（对方的回复也记在这）' required maxlength=1000>"
                                  "<button>记下</button>", action="progress", **common)
-    return (f"<section class=owner><h2>处理</h2><div class=row>{buttons}</div>{reasoned}"
-            f"<div class=meta>焦点</div><div class=row>{focus}</div>{edit}{progress}</section>")
+    open_deps = ",".join(d["id"] for d in task.get("open_dependencies", []))
+    holder = task.get("holder")
+    hand = _post(csrf, back,
+                 _who_input(task.get("people", ()), task.get("recent", ()), "交给谁") +
+                 "<input type=text name=ask placeholder='要对方做什么（可空）' maxlength=400>"
+                 f"<button class=primary>{'改交给他' if holder else '交给他'}</button>",
+                 action="handoff", state=state, cancel=open_deps, title=task["title"], **common)
+    take = (_post(csrf, back, f"<button>收回自己做</button>", action="takeback", cancel=open_deps, **common)
+            if state == "WAITING" and open_deps else "")
+    who = (f"<div class=meta>现在在 {e(holder)} 手上</div>" if holder else "<div class=meta>交给别人（任何名字都行，不必是成员）</div>")
+    return (f"<section class=owner><h2>处理</h2>{progress}{who}{hand}<div class=row>{take}{buttons}</div>{reasoned}"
+            f"<div class=meta>焦点</div><div class=row>{focus}</div>{edit}</section>")
+
+
+def _holder_of(form: dict, people: dict[str, str] | None) -> tuple[str | None, str] | None:
+    """(member id or None, name) from the form: `assign_to` (a member id) or `holder` (any name; a member's name
+    counts as that member)."""
+    people = people or {}
+    to = (form.get("assign_to") or "").strip()
+    if to:
+        if to not in people:
+            raise InvalidOperation("只能指派给工作区里的人", field="assign_to")
+        return to, people[to]
+    name = (form.get("holder") or "").strip()[:80]
+    if not name:
+        return None
+    member = next((pid for pid, n in people.items() if n == name), None)
+    return member, name
+
+
+def _hand_to(holder, task_ref: str, title: str, ask: str, base: dict, transition_ref: str, *,
+             already_waiting: bool = False) -> list[dict]:
+    """Wait on `holder`. A member also gets a request (sent once a bot is connected); anyone else is just a name."""
+    member, name = holder
+    wait = {"op": "add_dependency", "ref": "wait", "task_id": task_ref, "kind": "external_response",
+            "awaited_outcome": f"{name}{'回复' if member else '那边办好'}" + (f"：{ask}" if ask else ""),
+            "holder_name": name, **base, "reason": f"交给{name}"}
+    if member:
+        wait["responsible_principal_id"] = member
+    ops = [wait]
+    if member:
+        message = "\n".join(filter(None, [f"有件事想请你处理：{title}" if title else "有件事想请你处理", ask,
+                                           "（直接回复这条消息就好）"]))
+        ops.append({"op": "request_human_action", "task_id": task_ref, "assignee_principal_id": member,
+                    "request_kind": "execution", "title": title or name, "message": message, "urgency": "notify",
+                    "dependency_id": "$wait", "request": {"ask": ask} if ask else {}, **base, "reason": f"交给{name}"})
+    if not already_waiting:
+        ops.append({"op": "transition", "task_id": transition_ref, "to": "WAITING", **base, "reason": f"等{name}"})
+    return ops
 
 
 def notice(query: dict) -> str:
@@ -170,25 +221,34 @@ def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None) -
         if due:
             op["soft_due_at"] = due
         ops = [op]
-        to = form.get("assign_to")
-        if to:
-            if to not in (people or {}):
-                raise InvalidOperation("只能指派给工作区里的人", field="assign_to")
-            name, title, ask = people[to], op["title"].strip(), (form.get("ask") or "").strip()
+        holder = _holder_of(form, people)
+        if holder:
             op["state"] = "READY"
-            message = "\n".join(filter(None, [f"有件事想请你处理：{title}", ask, "（直接回复这条消息就好）"]))
-            ops += [
-                {"op": "add_dependency", "ref": "wait", "task_id": "$new", "kind": "external_response",
-                 "awaited_outcome": f"{name}回复" + (f"：{ask}" if ask else ""), "responsible_principal_id": to,
-                 **base, "reason": f"指派给{name}"},
-                {"op": "request_human_action", "task_id": "$new", "assignee_principal_id": to,
-                 "request_kind": "execution", "title": title, "message": message, "urgency": "notify",
-                 "dependency_id": "$wait", "request": {"ask": ask} if ask else {}, **base, "reason": f"指派给{name}"},
-                {"op": "transition", "task_id": "$new", "to": "WAITING", **base, "reason": f"等{name}回复"},
-            ]
+            ops += _hand_to(holder, "$new", op["title"].strip(), (form.get("ask") or "").strip(), base, "$new")
         if form.get("focus") in ("NOW", "NEXT1", "NEXT2"):
             ops.append({"op": "set_focus", "slot": form["focus"], "task_id": "$new", **base, "reason": "主人设焦点"})
-        return ops, (f"已新建，指派给{people[to]}，等对方回复" if to else "已新建")
+        return ops, (f"已新建，交给{holder[1]}" if holder else "已新建")
+    if action in ("handoff", "takeback"):
+        tid = form.get("task_id")
+        cancels = [d for d in (form.get("cancel") or "").split(",") if d]
+        ops = [{"op": "resolve_dependency", "dependency_id": d, "resolution": "cancelled", **base,
+                "reason": "改交给别人" if action == "handoff" else "主人收回自己做"} for d in cancels]
+        if action == "takeback":
+            if not cancels:
+                raise InvalidOperation("这件事没有在等别人", field="cancel")
+            ops.append({"op": "transition", "task_id": tid, "to": "READY", **base, "reason": "主人收回自己做"})
+            ops[0]["expected_version"] = version
+            return ops, "已收回，由你自己做"
+        holder = _holder_of(form, people)
+        if not holder:
+            raise InvalidOperation("写上交给谁", field="holder")
+        state = form.get("state")
+        if state == "INBOX":
+            ops.append({"op": "transition", "task_id": tid, "to": "READY", **base, "reason": f"交给{holder[1]}"})
+        ops += _hand_to(holder, tid, form.get("title") or "", (form.get("ask") or "").strip(), base, tid,
+                        already_waiting=(state == "WAITING"))
+        ops[0]["expected_version"] = version
+        return ops, f"已交给{holder[1]}"
     if action == "move":
         target = form.get("to")
         if (target in ("DONE", "CANCELLED", "BLOCKED") or form.get("reopen")) and not reason:

@@ -242,6 +242,8 @@ def _holder(deps, actor, names) -> str | None:
     before the person was a member carry no responsible id; an outcome that starts with their name still counts."""
     people = {pid: n for pid, n in names.items() if pid != actor.principal_id and n}
     for d in deps:
+        if d.get("holder_name"):
+            return d["holder_name"]
         who = d.get("responsible_principal_id")
         if who in people:
             return people[who]
@@ -403,7 +405,9 @@ def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str =
         panel = ""
         if owner_panel is not None:
             slot = view["focus"][0] if view.get("focus") else None
-            panel = owner_panel(dict(view["task"]), slot, tz)
+            opened = [d for d in view["dependencies"] if d.get("status") == "open"]
+            panel = owner_panel(dict(view["task"], open_dependencies=opened,
+                                     holder=_holder(opened, actor, names)), slot, tz)
         right = _task_pane(view, actor, names, tz, now, panel)
     else:
         since = (datetime.fromisoformat(now[:-1]) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")

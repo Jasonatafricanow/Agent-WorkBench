@@ -323,14 +323,19 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
             owner = who == "owner"
             csrf = csrf_value(app.owner_token) if owner else ""
             try:
-                quick = ""
+                quick, people, recent = "", [], []
                 if owner and (route.startswith("/task/") or route in ("/", "/dashboard")):
                     with closing(connect(app.db)) as conn:
                         people = assignable(conn, actor.workspace_id)
-                    quick = quick_add_form(csrf, back=route if route.startswith("/task/") else "/", people=people)
+                        recent = [r[0] for r in conn.execute(
+                            """SELECT holder_name FROM dependencies WHERE workspace_id=? AND holder_name IS NOT NULL
+                               GROUP BY holder_name ORDER BY MAX(created_at) DESC LIMIT 12""", (actor.workspace_id,))]
+                    quick = quick_add_form(csrf, back=route if route.startswith("/task/") else "/", people=people,
+                                           recent=recent)
                 if route.startswith("/task/"):
                     page = render_task(app.tasks, actor, app.db, route[len("/task/"):], now,
-                                       owner_panel=(lambda t, slot, tz: task_panel(csrf, t, slot, tz)) if owner else None,
+                                       owner_panel=(lambda t, slot, tz: task_panel(csrf, dict(t, people=people, recent=recent), slot, tz))
+                                       if owner else None,
                                        notice=notice(q) if owner else "", owner_html=quick)
                 elif route == "/calendar":
                     page = render_calendar(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"),
