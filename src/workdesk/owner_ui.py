@@ -61,7 +61,7 @@ FORM_CSS = """
 .owner{border-color:var(--accent)}.owner h2{color:var(--accent)}
 .owner form{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
 .owner input,.owner select,.owner textarea,.owner button{font:inherit;font-size:14px;padding:6px 8px;min-height:36px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px}
-.owner input[type=text],.owner textarea{flex:1 1 220px;min-width:0}.owner button{cursor:pointer}.owner button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.owner input[type=text],.owner textarea{flex:1 1 220px;min-width:0}.owner button{cursor:pointer}.owner button.primary{background:var(--accent);color:var(--pb-accent-ink);border-color:var(--accent)}
 .owner button.danger{color:var(--warn);border-color:var(--warn)}.owner .row{display:flex;flex-wrap:wrap;gap:6px}
 .notice{padding:8px 12px;border-radius:8px;margin-bottom:12px;border:1px solid var(--line)}.notice.bad{color:var(--warn);border-color:var(--warn)}.notice.good{color:var(--ok);border-color:var(--ok)}
 """

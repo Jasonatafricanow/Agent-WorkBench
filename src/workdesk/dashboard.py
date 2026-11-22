@@ -19,19 +19,19 @@ from .errors import Forbidden
 from .insights import schedule_load, stagnation
 from .storage import connect
 from .owner_ui import FORM_CSS
+from .panel_base import PB_CSS, hub
 from .task_service import SqliteTaskService
 
 CSS = """
-:root{--bg:#f6f5f2;--card:#fff;--ink:#1d1d1b;--muted:#6b6a66;--line:#e3e1dc;--accent:#2f5d8a;--warn:#a5482b;--ok:#3d7a4f;--soft:#8a6d2f}
-@media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#1f1f1d;--ink:#ecebe7;--muted:#9c9a94;--line:#33322f;--accent:#7fa8d1;--warn:#e08a6d;--ok:#7cbf8e;--soft:#d6b46f}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+:root{--bg:var(--pb-bg);--card:var(--pb-panel);--ink:var(--pb-ink);--muted:var(--pb-muted);--line:var(--pb-line);--accent:var(--pb-accent);--warn:var(--pb-warn);--ok:var(--pb-ok);--soft:var(--pb-warn)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:var(--pb-fs)/1.55 var(--pb-font)}
 main{max-width:1100px;margin:0 auto;padding:16px}h1{font-size:20px;margin:4px 0 2px}h2{font-size:15px;margin:0 0 8px;color:var(--muted);font-weight:600}
 nav{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 12px;border-bottom:1px solid var(--line)}nav a{padding:6px 12px;border:0;border-bottom:2px solid transparent;color:var(--muted)}
 nav a.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
 .sub{color:var(--muted);font-size:13px;margin-bottom:12px}.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
-section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+section{background:var(--card);border:1px solid var(--line);border-radius:var(--pb-r-lg);padding:12px 14px}
 .focus{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-bottom:12px}
-.slot{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}.slot b{display:block;font-size:12px;color:var(--accent);letter-spacing:.04em}
+.slot{background:var(--card);border:1px solid var(--line);border-radius:var(--pb-r-lg);padding:10px 12px}.slot b{display:block;font-size:12px;color:var(--accent);letter-spacing:.04em}
 ul{list-style:none;margin:0;padding:0}li{padding:6px 0;border-top:1px solid var(--line)}li:first-child{border-top:0}
 .meta{color:var(--muted);font-size:12px}a{color:inherit;text-decoration:none;border-bottom:1px dotted var(--line)}.warn{color:var(--warn)}.ok{color:var(--ok)}.empty{color:var(--muted);font-size:13px}
 .tag{display:inline-block;font-size:11px;padding:0 6px;border-radius:9px;border:1px solid var(--line);margin-right:6px;color:var(--muted)}
@@ -40,7 +40,7 @@ ul{list-style:none;margin:0;padding:0}li{padding:6px 0;border-top:1px solid var(
 form.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:13px}form.filters select,form.filters button{font:inherit;font-size:13px;padding:3px 6px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px}
 .bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
 table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:6px 4px;border-top:1px solid var(--line);text-align:left}th{color:var(--muted);font-weight:600;font-size:12px}
-.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.num{font-family:var(--pb-mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 .lines{display:grid;gap:12px}.line h2{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;color:var(--ink);font-size:16px;margin:0 0 2px}
 .line .tag{font-weight:400}.line ol{list-style:none;margin:8px 0 0;padding:0 0 0 14px;border-left:2px solid var(--line)}
 .line .day{position:relative;padding:2px 0 8px}.line .day:before{content:"";position:absolute;left:-20px;top:8px;width:10px;height:10px;border-radius:50%;background:var(--card);border:2px solid var(--accent)}
@@ -123,7 +123,7 @@ def _page(title: str, active: str, body: str, now: str, tz: ZoneInfo, *, sub: st
     stamp = _local(now, tz, "%Y-%m-%d %H:%M")
     return (f"<!doctype html><html lang=zh-CN><head><meta charset=utf-8>"
             f"<meta name=viewport content='width=device-width,initial-scale=1'><title>{e(title)}</title>"
-            f"<style>{CSS}{FORM_CSS if owner else ''}</style></head><body><main><h1>{e(title)}</h1>"
+            f"<style>{PB_CSS}{CSS}{FORM_CSS if owner else ''}</style></head><body>{hub('workbench')}<main><h1>{e(title)}</h1>"
             f"<div class=sub>{'主人模式' if owner else '只读视图'} · {stamp}{' · ' + sub if sub else ''}</div><nav>{tabs}</nav>{body}</main></body></html>")
 
 
