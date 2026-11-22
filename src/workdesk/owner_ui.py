@@ -85,7 +85,7 @@ def _who_input(people, recent, placeholder: str) -> str:
 def quick_add_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = (), recent: list[str] = ()) -> str:
     """The work page's one-line add: a title and who does it; the rest folds away. Handing it to someone works like
     sending a mail: the task stays on the owner's board in WAITING until that person answers."""
-    assign = _who_input(people, recent, "交给谁（空着=自己做）")
+    assign = _who_input(people, recent, "交给谁（可空）")
     priorities = "".join(f"<option value={p}{' selected' if p == 2 else ''}>优先级 {p}</option>" for p in range(5))
     ask = "<input type=text name=ask placeholder='交给别人时：要对方做什么' maxlength=400>"
     return (
@@ -113,6 +113,8 @@ def task_panel(csrf: str, task: dict, focus_slot: str | None, tz: ZoneInfo) -> s
     back = f"/task/{tid}"
     common = {"task_id": tid, "version": version}
     moves = sorted(TRANSITIONS.get(state, ()) - {"WAITING"}, key=list(STATE_LABELS).index)
+    if state == "WAITING" and task.get("open_dependencies"):
+        moves = [m for m in moves if m not in ("READY", "DOING")]  # "收回自己做" also ends the wait
     closed = state in ("DONE", "CANCELLED")
     needs_reason = moves if closed else [m for m in moves if m in ("DONE", "CANCELLED", "BLOCKED")]
     plain = [m for m in moves if m not in needs_reason]
@@ -136,14 +138,14 @@ def task_panel(csrf: str, task: dict, focus_slot: str | None, tz: ZoneInfo) -> s
     priorities = "".join(f"<option value={p}{' selected' if p == task.get('priority') else ''}>优先级 {p}</option>"
                          for p in range(5))
     delay = "".join(f"<option value={k}>{DELAY_LABELS[k]}</option>" for k in sorted(DELAY_KINDS))
-    edit = _post(csrf, back,
+    edit = "<details class=edit><summary>修改标题、下一步、期望完成、优先级</summary>" + _post(csrf, back,
                  f"<input type=text name=title value='{e(task['title'])}' required maxlength=200>"
                  f"<input type=text name=next_action value='{e(task.get('next_action'))}' placeholder='下一步' maxlength=400>"
                  f"<label class=meta>期望完成 <input type=datetime-local name=soft_due value='{_utc_to_input(task.get('soft_due_at'), tz)}'></label>"
                  f"<select name=priority>{priorities}</select>"
                  f"<select name=delay_kind><option value=''>（往后推时选原因）</option>{delay}</select>"
                  "<input type=text name=reason placeholder='往后推的原因' maxlength=400>"
-                 "<button>保存修改</button>", action="edit", **common)
+                 "<button>保存修改</button>", action="edit", **common) + "</details>"
     progress = _post(csrf, back, "<input type=text name=text placeholder='记一笔进展（对方的回复也记在这）' required maxlength=1000>"
                                  "<button>记下</button>", action="progress", **common)
     open_deps = ",".join(d["id"] for d in task.get("open_dependencies", []))

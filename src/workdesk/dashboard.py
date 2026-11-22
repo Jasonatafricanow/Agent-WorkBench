@@ -94,6 +94,7 @@ ol.thread .when{font:12px var(--pb-mono);color:var(--muted)}ol.thread .what{font
 .quiet{font-size:13px;color:var(--muted);border:1px dashed var(--line);border-radius:var(--pb-r);padding:10px 12px}
 section.alert{border-color:var(--warn);margin-bottom:10px}section.alert h3{font-size:14px;color:var(--warn);margin:0 0 6px}
 .pane section.owner h2{font-size:13px;color:var(--muted)}
+.pane details.edit summary{cursor:pointer;font-size:13px;color:var(--muted);margin:10px 0 4px}
 .pane section.owner{margin-top:22px;border-top:1px solid var(--line);border-radius:0;border-left:0;border-right:0;border-bottom:0;padding:16px 0 0}
 @media (max-width:860px){.mail{display:flex;flex-direction:column;min-height:0}.rail{border-right:0;border-bottom:1px solid var(--line);max-height:none}
   .mail.has-sel .pane{order:-1;border-bottom:1px solid var(--line)}.pane{padding:16px}.slots{grid-template-columns:1fr}main{padding:12px}}
