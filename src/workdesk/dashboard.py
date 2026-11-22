@@ -41,6 +41,10 @@ form.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-botto
 .bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
 table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:6px 4px;border-top:1px solid var(--line);text-align:left}th{color:var(--muted);font-weight:600;font-size:12px}
 .num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.lines{display:grid;gap:12px}.line h2{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;color:var(--ink);font-size:16px;margin:0 0 2px}
+.line .tag{font-weight:400}.line ol{list-style:none;margin:8px 0 0;padding:0 0 0 14px;border-left:2px solid var(--line)}
+.line .day{position:relative;padding:2px 0 8px}.line .day:before{content:"";position:absolute;left:-20px;top:8px;width:10px;height:10px;border-radius:50%;background:var(--card);border:2px solid var(--accent)}
+.line .day>b{font-size:13px;color:var(--accent)}.line .step{padding:3px 0 0;border:0}.line .step .when{color:var(--muted);font-variant-numeric:tabular-nums;margin-right:6px}
 """
 
 NAV = (("work", "/", "工作台"), ("calendar", "/calendar", "日历"), ("timeline", "/timeline", "时间线"),
@@ -228,7 +232,7 @@ CAL_TAGS = {"official_due": ("official", "官方 DDL"), "soft_due": ("soft", "So
 
 
 def render_calendar(tasks, actor, database: str, now: str, *, range_kind: str = "week",
-                    project: str | None = None, requester: str | None = None) -> str:
+                    project: str | None = None, requester: str | None = None, owner: bool = False) -> str:
     tz, names = _ctx(actor, database)
     range_kind = range_kind if range_kind in ("week", "month") else "week"
     first, after = range_window(range_kind, now, tz)
@@ -259,32 +263,55 @@ def render_calendar(tasks, actor, database: str, now: str, *, range_kind: str = 
     head = _pills("/calendar", range_kind, (("week", "本周"), ("month", "本月")), {"project": project, "requester": requester})
     form = _filters("/calendar", actor, database, {"project": project, "requester": requester}, {"range": range_kind})
     body = head + form + (f"<div class=grid>{''.join(rows)}</div>" if rows else '<p class="empty">这段时间没有期限和提醒</p>')
-    return _page("日历", "calendar", body, now, tz, sub="官方 DDL 不会被排期建议移动；Soft Due 的调整只是建议")
+    return _page("日历", "calendar", body, now, tz, sub="官方 DDL 不会被排期建议移动；Soft Due 的调整只是建议", owner=owner)
 
 
 # ------------------------------------------------------------------------------- Timeline
 def render_timeline(tasks, actor, database: str, now: str, *, range_kind: str = "week",
-                    project: str | None = None, requester: str | None = None) -> str:
+                    project: str | None = None, requester: str | None = None, owner: bool = False) -> str:
     tz, names = _ctx(actor, database)
     range_kind = range_kind if range_kind in ("today", "week", "month") else "week"
     first, after = range_window(range_kind, now, tz)
     tl = views.timeline(database, actor=actor, start=_utc(first, tz), end=_utc(after, tz),
                         project_id=project, requester_id=requester)
-    groups: dict[str, list] = {}
-    for item in tl["items"]:
-        groups.setdefault(item["local_date"], []).append(item)
-    sections = "".join(f"<section><h2>{d}</h2>{_list(items, lambda ev: _event_line(ev, tz, names))}</section>"
-                       for d, items in groups.items())
+    sections = "".join(_line_card(line, tz, names) for line in tl["lines"])
     head = _pills("/timeline", range_kind, (("today", "今天"), ("week", "本周"), ("month", "本月")),
                   {"project": project, "requester": requester})
     form = _filters("/timeline", actor, database, {"project": project, "requester": requester}, {"range": range_kind})
-    body = head + form + (f"<div class=grid>{sections}</div>" if sections else '<p class="empty">这段时间没有记录</p>')
-    return _page("时间线", "timeline", body, now, tz)
+    body = head + form + (f"<div class=lines>{sections}</div>" if sections else '<p class="empty">这段时间没有记录</p>')
+    return _page("时间线", "timeline", body, now, tz, sub="一个任务一条线，同一天同一次操作合成一步", owner=owner)
+
+
+def _stage_label(stage: dict) -> str:
+    if stage.get("type") == "agent_run":
+        return f"Agent 执行 {e(stage.get('kind'))} · {e(stage.get('status'))}"
+    label = KIND_LABELS.get(stage["kind"], e(stage["kind"]))
+    if stage.get("to_state"):
+        return f"{label}：{STATE_LABELS.get(stage['to_state'], e(stage['to_state']))}"
+    return label
+
+
+def _line_card(line: dict, tz, names) -> str:
+    def step(s):
+        stages = " → ".join(_stage_label(x) for x in s["stages"])
+        reasons = "；".join(e(r) for r in s["reasons"])
+        who = names.get(s["actor_id"], s["actor_id"]) if s["actor_id"] != "agent-run" else "Agent"
+        src = f" · 来源 {e(s['source_ref'])}" if s.get("source_ref") else ""
+        return (f"<li class=step><span class=when>{_local(s['at'], tz, '%H:%M')}</span>{stages}"
+                f"<div class=meta>{e(who)}{' · ' + reasons if reasons else ''}{src}</div></li>")
+    days = "".join(f"<li class=day><b>{e(d['date'][5:])}</b><ul>{''.join(step(s) for s in d['steps'])}</ul></li>"
+                   for d in line["days"])
+    first, last = _local(line["first_at"], tz, "%m-%d"), _local(line["last_at"], tz, "%m-%d")
+    span = first if first == last else f"{first} → {last}"
+    earlier = " · 接着更早的记录" if line["earlier"] else ""
+    state = STATE_LABELS.get(line.get("state"), line.get("state") or "")
+    return (f"<section class=line><h2><a href='/task/{e(line['task_id'])}'>{e(line['title'])}</a>"
+            f"<span class=tag>{e(state)}</span></h2><div class=meta>{span}{earlier}</div><ol>{days}</ol></section>")
 
 
 # ------------------------------------------------------------------------------- Projects
 def render_projects(tasks, actor, database: str, now: str, *, project: str | None = None,
-                    requester: str | None = None) -> str:
+                    requester: str | None = None, owner: bool = False) -> str:
     tz, names = _ctx(actor, database)
     pool = views.projects(database, actor=actor, project_id=project, requester_id=requester)["projects"]
 
@@ -306,11 +333,11 @@ def render_projects(tasks, actor, database: str, now: str, *, project: str | Non
 
     form = _filters("/projects", actor, database, {"project": project, "requester": requester}, {})
     body = form + (f"<div class=grid>{''.join(card(p) for p in pool)}</div>" if pool else '<p class="empty">没有项目</p>')
-    return _page("项目池", "projects", body, now, tz)
+    return _page("项目池", "projects", body, now, tz, owner=owner)
 
 
 # ----------------------------------------------------------------------------------- Life
-def render_life(actor, database: str, now: str, adapter) -> str:
+def render_life(actor, database: str, now: str, adapter, *, owner: bool = False) -> str:
     """Owner only. Shows Facetide's confirmed state as Facetide reports it; WorkBench keeps no copy
     beyond the adapter's display cache."""
     with closing(connect(database)) as conn:
@@ -324,7 +351,7 @@ def render_life(actor, database: str, now: str, adapter) -> str:
     s = state.get("summary")
     if not s:
         body = f'<section><p class="empty">{notes[status]}</p></section>'
-        return _page("生活", "life", body, now, tz, sub="来源：Facetide（只读）")
+        return _page("生活", "life", body, now, tz, sub="来源：Facetide（只读）", owner=owner)
     latest, previous = s.get("latest"), s.get("previous")
     scale = s.get("score_scale") or {"min": 0, "max": 10}
     domain_names = {d["domain_id"]: d["name"] for d in s.get("domains", [])}
@@ -363,7 +390,7 @@ def render_life(actor, database: str, now: str, adapter) -> str:
                   empty="没有目标")
     body = f"<div class=grid>{wheel}{axes}<section><h2>长期目标</h2>{goals}</section></div>"
     sub = "来源：Facetide（只读）" + (f" · {notes[status]}" if notes[status] else f" · 更新于 {_local(state['fetched_at'], tz)}")
-    return _page("生活", "life", body, now, tz, sub=sub)
+    return _page("生活", "life", body, now, tz, sub=sub, owner=owner)
 
 
 # ----------------------------------------------------------------------------------- Task

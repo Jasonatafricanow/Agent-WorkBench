@@ -8,6 +8,7 @@ Nothing here writes.
 """
 from __future__ import annotations
 
+import json
 import re
 from contextlib import closing
 from datetime import datetime
@@ -131,19 +132,23 @@ def timeline(database: str | Path, *, actor: ActorContext, start: str, end: str,
         # A requester sees the shared requester rule (their own events + outward milestones).
         scope, scope_args = ("", []) if member else (REQUESTER_EVENT_SCOPE, [actor.principal_id, actor.principal_id])
         rows = conn.execute(
-            f"""SELECT e.id, e.task_id, t.title, e.kind, e.actor_id, e.reason, e.evidence_type, e.source_ref,
+            f"""SELECT e.id, e.task_id, t.title, t.state AS task_state, t.created_at AS task_created_at, e.kind,
+                       e.actor_id, e.reason, e.evidence_type, e.source_ref, e.after_json,
                        e.occurred_at FROM task_events e JOIN tasks t ON t.workspace_id=e.workspace_id AND t.id=e.task_id
                 WHERE e.workspace_id=? AND e.occurred_at >= ? AND e.occurred_at < ? {scope} {narrow}
                 ORDER BY e.occurred_at DESC, e.rowid DESC LIMIT ?""",
             (actor.workspace_id, start, end, *scope_args, *narrow_args, limit)).fetchall()
         items = [{"type": "task_event", "at": r["occurred_at"], "local_date": _day(r["occurred_at"], tz),
                   "event_id": r["id"], "task_id": r["task_id"], "title": r["title"], "kind": r["kind"],
-                  "actor_id": r["actor_id"], "reason": r["reason"],
+                  "actor_id": r["actor_id"], "reason": r["reason"], "task_state": r["task_state"],
+                  "task_created_at": r["task_created_at"],
+                  **({"to_state": json.loads(r["after_json"] or "{}").get("state")} if r["kind"] == "state_changed" else {}),
                   **({"evidence_type": r["evidence_type"], "source_ref": r["source_ref"]} if member else {})}
                  for r in rows]
         if member:  # Agent execution record: background Runs that touched a task
             for r in conn.execute(
-                    f"""SELECT w.id, w.kind, w.status, w.host_run_ref, w.updated_at, t.id AS task_id, t.title
+                    f"""SELECT w.id, w.kind, w.status, w.host_run_ref, w.updated_at, t.id AS task_id, t.title,
+                               t.state AS task_state, t.created_at AS task_created_at
                         FROM wake_events w JOIN tasks t ON t.workspace_id=w.workspace_id AND t.id=w.task_id
                         WHERE w.workspace_id=? AND w.status IN ('completed','failed','unknown')
                         AND COALESCE(w.host_run_ref,'') NOT IN ('inline','approval-command')
@@ -151,9 +156,39 @@ def timeline(database: str | Path, *, actor: ActorContext, start: str, end: str,
                     (actor.workspace_id, start, end, *args, limit)):
                 items.append({"type": "agent_run", "at": r["updated_at"], "local_date": _day(r["updated_at"], tz),
                               "wake_event_id": r["id"], "task_id": r["task_id"], "title": r["title"],
+                              "task_state": r["task_state"], "task_created_at": r["task_created_at"],
                               "kind": r["kind"], "status": r["status"], "run_ref": r["host_run_ref"]})
     items.sort(key=lambda i: i["at"], reverse=True)
-    return {"start": start, "end": end, "items": items[:limit]}
+    items = items[:limit]
+    return {"start": start, "end": end, "items": items, "lines": task_lines(items, start)}
+
+
+def task_lines(items: list[dict], start: str) -> list[dict]:
+    """One task = one line (the shape MR-Mem uses for one thing moving forward): its stages in time order,
+    grouped by local day; changes made together (same day, same person, same source, e.g. one owner form)
+    are one step. `earlier` says the line began before this window. Lines are ordered by latest activity."""
+    lines: dict[str, dict] = {}
+    for item in sorted(reversed(items), key=lambda i: i["at"]):  # oldest first, ties in recorded order
+        line = lines.setdefault(item["task_id"], {
+            "task_id": item["task_id"], "title": item["title"], "state": item.get("task_state"),
+            "first_at": item["at"], "last_at": item["at"], "earlier": (item.get("task_created_at") or start) < start,
+            "days": []})
+        line["last_at"] = item["at"]
+        if not line["days"] or line["days"][-1]["date"] != item["local_date"]:
+            line["days"].append({"date": item["local_date"], "steps": []})
+        steps = line["days"][-1]["steps"]
+        who = item.get("actor_id") or "agent-run"
+        same = steps and steps[-1]["actor_id"] == who and (
+            (item.get("source_ref") and steps[-1]["source_ref"] == item.get("source_ref")) or steps[-1]["at"][:16] == item["at"][:16])
+        if not same:
+            steps.append({"at": item["at"], "actor_id": who, "source_ref": item.get("source_ref"), "stages": [], "reasons": []})
+            step = steps[-1]
+        else:
+            step = steps[-1]
+        step["stages"].append({k: item[k] for k in ("type", "kind", "to_state", "status") if item.get(k) is not None})
+        if item.get("reason") and item["reason"] not in step["reasons"]:
+            step["reasons"].append(item["reason"])
+    return sorted(lines.values(), key=lambda line: line["last_at"], reverse=True)
 
 
 def projects(database: str | Path, *, actor: ActorContext, project_id: str | None = None,

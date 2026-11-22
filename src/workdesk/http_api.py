@@ -258,11 +258,12 @@ class WorkbenchApp:
         """Run one owner form; returns the success message (raises WorkbenchError on refusal)."""
         from contextlib import closing
         from zoneinfo import ZoneInfo
-        from .owner_ui import operations
+        from .owner_ui import assignable, operations
         from .storage import connect
         with closing(connect(self.db)) as conn:
             row = conn.execute("SELECT timezone FROM workspaces WHERE id=?", (self.owner_actor.workspace_id,)).fetchone()
-        ops, message = operations(form, ZoneInfo(row["timezone"] if row else "Asia/Shanghai"))
+            people = dict(assignable(conn, self.owner_actor.workspace_id))
+        ops, message = operations(form, ZoneInfo(row["timezone"] if row else "Asia/Shanghai"), people)
         self.tasks.apply(actor=self.owner_actor, idempotency_key=f"owner-web:{form.get('nonce', '')}", operations=ops)
         return message
 
@@ -281,7 +282,9 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
     from urllib.parse import quote, urlparse
     from .dashboard import (render_calendar, render_dashboard, render_life, render_projects, render_task,
                             render_timeline)
-    from .owner_ui import csrf_value, new_task_form, notice, task_panel
+    from contextlib import closing
+    from .owner_ui import assignable, csrf_value, new_task_form, notice, task_panel
+    from .storage import connect
     pages = {"/calendar", "/timeline", "/projects", "/life"}
 
     class Handler(BaseHTTPRequestHandler):
@@ -325,16 +328,22 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
                                        owner_panel=(lambda t, slot, tz: task_panel(csrf, t, slot, tz)) if owner else None,
                                        notice=notice(q) if owner else "")
                 elif route == "/calendar":
-                    page = render_calendar(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"), **narrow)
+                    page = render_calendar(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"),
+                                           owner=owner, **narrow)
                 elif route == "/timeline":
-                    page = render_timeline(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"), **narrow)
+                    page = render_timeline(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"),
+                                           owner=owner, **narrow)
                 elif route == "/projects":
-                    page = render_projects(app.tasks, actor, app.db, now, **narrow)
+                    page = render_projects(app.tasks, actor, app.db, now, owner=owner, **narrow)
                 elif route == "/life":
-                    page = render_life(actor, app.db, now, app.life)
+                    page = render_life(actor, app.db, now, app.life, owner=owner)
                 else:
-                    page = render_dashboard(app.tasks, actor, app.db, now,
-                                            owner_html=(notice(q) + new_task_form(csrf)) if owner else "")
+                    owner_html = ""
+                    if owner:
+                        with closing(connect(app.db)) as conn:
+                            people = assignable(conn, actor.workspace_id)
+                        owner_html = notice(q) + new_task_form(csrf, people=people)
+                    page = render_dashboard(app.tasks, actor, app.db, now, owner_html=owner_html)
             except WorkbenchError as exc:
                 return self._send(404 if exc.code in ("NOT_FOUND", "FORBIDDEN") else 400, {"code": exc.code})
             self._send(200, page.encode("utf-8"), "text/html")

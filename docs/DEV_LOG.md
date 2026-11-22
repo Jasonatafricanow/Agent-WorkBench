@@ -81,6 +81,7 @@ WorkBench 管工作，MR-Mem 管记忆，Agent Host 管 Agent 的运行，Mind R
 | 11-17 | `9521ad6` | P1/P3：五视图看板；生活视图经 Facetide 只读接口（facetide-mcp `1d1cc99`） |
 | 11-17 | `1d3a42d` | LiteMonitor 适配：`/status/v1`、独立只读监听、插件；系统边界文档；本开发日志 |
 | 11-17 | 本次 | 局域网只读监听 `WORKBENCH_LAN_BIND`（看板 + 状态，无 POST）；会话管理前端的设计讨论（见第九节） |
+| 11-22 | 见 git log | 主人新建任务可「指派给」工作区里的人：任务留在主人这边、挂 external_response 依赖进 WAITING，给对方的消息进 `delivery_outbox`（工作 bot 上线后发出）；对方经 `respond_human_action` 回复即解除依赖，没别的可等就回到 READY。请人处理的对象是团队外的人时，只有主人本人或对方自己的请求可以发。时间线改成一个任务一条线（`views.timeline` 多给 `lines`），同一天同一人同一来源的变化合成一步；主人登录的各页都显示「主人模式」 |
 
 PR：Agent-WorkBench#1（框架，草稿）← #2（WB-LIFE-01，叠在 #1 上）← 本分支；facetide-mcp#8。
 

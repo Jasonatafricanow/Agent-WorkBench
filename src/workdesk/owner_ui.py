@@ -67,7 +67,22 @@ FORM_CSS = """
 """
 
 
-def new_task_form(csrf: str, back: str = "/") -> str:
+def assignable(conn, workspace_id: str) -> list[tuple[str, str]]:
+    """People the owner can hand a new task to: the workspace's other active human members."""
+    return [(r[0], r[1]) for r in conn.execute(
+        """SELECT p.id, p.display_name FROM memberships m JOIN principals p ON p.id=m.principal_id
+           WHERE m.workspace_id=? AND m.active=1 AND p.active=1 AND p.kind='human' AND m.role!='owner'
+           ORDER BY p.display_name""", (workspace_id,))]
+
+
+def new_task_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = ()) -> str:
+    """With `people`, the owner may hand the task to one of them: like sending a mail, the task stays on the
+    owner's board in WAITING until that person answers."""
+    assign = ""
+    if people:
+        options = "".join(f"<option value='{e(pid)}'>指派给 {e(name)}</option>" for pid, name in people)
+        assign = (f"<select name=assign_to><option value=''>自己做</option>{options}</select>"
+                  "<input type=text name=ask placeholder='指派时：要对方做什么（可空，会发给对方）' maxlength=400>")
     priorities = "".join(f"<option value={p}{' selected' if p == 2 else ''}>优先级 {p}</option>" for p in range(5))
     return (
         "<section class=owner><h2>新建任务（我自己的）</h2>"
@@ -79,7 +94,7 @@ def new_task_form(csrf: str, back: str = "/") -> str:
         "<select name=state><option value=READY>可做</option><option value=DOING>马上做</option><option value=INBOX>先放收件箱</option></select>"
         "<select name=focus><option value=''>不设焦点</option><option value=NOW>设为 NOW</option>"
         "<option value=NEXT1>设为 NEXT1</option><option value=NEXT2>设为 NEXT2</option></select>"
-        "<button class=primary>新建</button></form></section>")
+        f"{assign}<button class=primary>新建</button></form></section>")
 
 
 def _post(csrf: str, back: str, inner: str, **fields) -> str:
@@ -138,8 +153,8 @@ def notice(query: dict) -> str:
     return ""
 
 
-def operations(form: dict, tz: ZoneInfo) -> tuple[list[dict], str]:
-    """A submitted form -> (TaskService operations, message on success)."""
+def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None) -> tuple[list[dict], str]:
+    """A submitted form -> (TaskService operations, message on success). `people`: assignable id -> name."""
     action = form.get("action")
     ref = f"owner-web:{form.get('nonce', '')}"
     base = {"evidence_type": "explicit_user", "source_ref": ref}
@@ -154,9 +169,25 @@ def operations(form: dict, tz: ZoneInfo) -> tuple[list[dict], str]:
         if due:
             op["soft_due_at"] = due
         ops = [op]
+        to = form.get("assign_to")
+        if to:
+            if to not in (people or {}):
+                raise InvalidOperation("只能指派给工作区里的人", field="assign_to")
+            name, title, ask = people[to], op["title"].strip(), (form.get("ask") or "").strip()
+            op["state"] = "READY"
+            message = "\n".join(filter(None, [f"有件事想请你处理：{title}", ask, "（直接回复这条消息就好）"]))
+            ops += [
+                {"op": "add_dependency", "ref": "wait", "task_id": "$new", "kind": "external_response",
+                 "awaited_outcome": f"{name}回复" + (f"：{ask}" if ask else ""), "responsible_principal_id": to,
+                 **base, "reason": f"指派给{name}"},
+                {"op": "request_human_action", "task_id": "$new", "assignee_principal_id": to,
+                 "request_kind": "execution", "title": title, "message": message, "urgency": "notify",
+                 "dependency_id": "$wait", "request": {"ask": ask} if ask else {}, **base, "reason": f"指派给{name}"},
+                {"op": "transition", "task_id": "$new", "to": "WAITING", **base, "reason": f"等{name}回复"},
+            ]
         if form.get("focus") in ("NOW", "NEXT1", "NEXT2"):
             ops.append({"op": "set_focus", "slot": form["focus"], "task_id": "$new", **base, "reason": "主人设焦点"})
-        return ops, "已新建"
+        return ops, (f"已新建，指派给{people[to]}，等对方回复" if to else "已新建")
     if action == "move":
         target = form.get("to")
         if (target in ("DONE", "CANCELLED", "BLOCKED") or form.get("reopen")) and not reason:

@@ -66,7 +66,9 @@ LEVELS = tuple(level.name.lower() for level in AutonomyLevel)
 PATCHABLE = ("title", "goal", "next_action", "priority", "soft_due_at",
              "planned_start_at", "official_due_at", "project_id", "assignee_id")
 DUE_FIELDS = ("soft_due_at", "official_due_at")
-REQUESTER_OPS = frozenset({"create_task", "append_progress", "request_human_action", "link_inbox"})
+# respond_human_action: a requester answers what was asked of them (the request names them as assignee).
+REQUESTER_OPS = frozenset({"create_task", "append_progress", "request_human_action", "link_inbox",
+                           "respond_human_action"})
 # Ops that only append related records; they bump the task version but do not
 # overwrite task fields, so the caller need not hold the latest version.
 NO_VERSION_CHECK = frozenset({"set_focus", "link_inbox", "respond_human_action"})
@@ -1271,6 +1273,19 @@ class _Batch:
             assignee = self.owner_id
         else:
             assignee = op.get("assignee_principal_id") or self.owner_id
+            if assignee != task["requester_id"] and self.role_of(assignee) not in (None, "owner", "editor"):
+                # Asking someone outside the team is external communication (same rule as an outside reminder):
+                # the owner's own call, unless it is about that person's own request.
+                self.owner_only("ask someone outside the team to act", op)
+        dep_id = self.ref(op.get("dependency_id"))
+        if dep_id is not None and self.c.execute(
+                """SELECT 1 FROM dependencies WHERE workspace_id=? AND id=? AND task_id=? AND status='open'
+                   AND responsible_principal_id=?""", (self.ws, dep_id, task["id"], assignee)).fetchone() is None:
+            raise InvalidOperation("dependency_id must be an open dependency of this task on the assignee",
+                                   field="dependency_id")
+        request = _obj(op.get("request"), "request")
+        if dep_id is not None:
+            request["dependency_id"] = dep_id  # the answer releases this wait (respond_human_action)
         kind = op.get("request_kind")
         if kind not in ("input", "decision", "review", "execution", "exception"):
             raise InvalidOperation("unsupported request_kind", field="request_kind", allowed=list(("input", "decision", "review", "execution", "exception")))
@@ -1282,12 +1297,13 @@ class _Batch:
                      assignee_principal_id,request_kind,title,request_json,due_at,urgency,created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (request_id, self.ws, task["id"], self.actor.principal_id, assignee, kind,
-                 _text(op.get("title"), "title", required=True), _dumps(_obj(op.get("request"), "request")),
+                 _text(op.get("title"), "title", required=True), _dumps(request),
                  _opt_utc(op.get("due_at"), "due_at"), urgency, self.now, self.now))
         except sqlite3.IntegrityError as exc:
             raise InvalidOperation("assignee must be an active human member") from exc
         self.bind(op, request_id)
-        self.announce(task["id"], assignee, urgency, _text(op.get("title"), "title"), request_id)
+        self.announce(task["id"], assignee, urgency, _text(op.get("title"), "title"), request_id,
+                      text=_text(op.get("message"), "message"))
         return {"task_id": task["id"], "human_action_id": request_id,
                 "event_id": self.event(task["id"], "human_action_requested", op, evidence, after={
                     "human_action_id": request_id, "assignee": assignee, "kind": kind, "urgency": urgency})}
@@ -1299,14 +1315,15 @@ class _Batch:
         # An outside requester's messages never interrupt the owner; they wait for the digest.
         return "batch" if self.role == "requester" else urgency
 
-    def announce(self, task_id: str, assignee: str, urgency: str, title: str, request_id: str) -> None:
+    def announce(self, task_id: str, assignee: str, urgency: str, title: str, request_id: str,
+                 text: str | None = None) -> None:
         if urgency not in ("notify", "interrupt"):
             return
         self.c.execute(
             """INSERT INTO delivery_outbox(id,workspace_id,task_id,recipient_principal_id,channel,payload_json,
                  dedupe_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
             (self.s._new_id("dlv-out"), self.ws, task_id, assignee, "telegram",
-             _dumps({"text": ("【急】" if urgency == "interrupt" else "") + "需要你处理：" + title,
+             _dumps({"text": ("【急】" if urgency == "interrupt" else "") + (text or "需要你处理：" + title),
                      "human_action_id": request_id}), f"human:{request_id}", self.now, self.now))
 
     def op_respond_human_action(self, op: dict, evidence: str) -> dict:
@@ -1340,11 +1357,39 @@ class _Batch:
              "inline" if inline else None, self.now, self.now))
         result = {"human_action_id": request_id, "wake_event_id": wake_id, "status": status}
         if req["task_id"]:
-            task = self.task(dict(op, task_id=req["task_id"]), check_version=False)
+            # Being asked is the access: a requester answers on the owner's task without seeing the rest of it.
+            task = self.c.execute("SELECT * FROM tasks WHERE workspace_id=? AND id=?", (self.ws, req["task_id"])).fetchone()
+            self.touched.setdefault(task["id"], task["version"])
             result["task_id"] = task["id"]
             result["event_id"] = self.event(task["id"], "human_action_responded", op, evidence,
                                             after={"human_action_id": request_id, "status": status})
+            dep_id = json.loads(req["request_json"] or "{}").get("dependency_id")
+            if dep_id:
+                result.update(self._release_wait(task, dep_id, op, evidence))
         return result
+
+    def _release_wait(self, task, dep_id: str, op: dict, evidence: str) -> dict:
+        """The awaited person answered (yes or no): the wait on them ends, and a task left with nothing to
+        wait for goes back to READY so it shows up as the owner's to pick up again."""
+        dep = self.c.execute("SELECT status FROM dependencies WHERE workspace_id=? AND id=?", (self.ws, dep_id)).fetchone()
+        if dep is None or dep["status"] != "open":
+            return {}
+        self.c.execute("UPDATE dependencies SET status='resolved', resolved_source_ref=?, resolved_at=? WHERE id=?",
+                       (op["source_ref"], self.now, dep_id))
+        self.c.execute("""UPDATE reminders SET status='cancelled', updated_at=? WHERE workspace_id=? AND status='scheduled'
+                          AND dependency_id=?""", (self.now, self.ws, dep_id))
+        self.event(task["id"], "dependency_resolved", op, evidence, before={"status": "open"},
+                   after={"dependency_id": dep_id, "status": "resolved"})
+        out = {"dependency_resolved": dep_id}
+        current = self.c.execute("SELECT state FROM tasks WHERE workspace_id=? AND id=?", (self.ws, task["id"])).fetchone()["state"]
+        still = self.c.execute("SELECT 1 FROM dependencies WHERE workspace_id=? AND task_id=? AND status='open'",
+                               (self.ws, task["id"])).fetchone()
+        if current == "WAITING" and not still:
+            self.c.execute("UPDATE tasks SET state='READY' WHERE workspace_id=? AND id=?", (self.ws, task["id"]))
+            self.event(task["id"], "state_changed", dict(op, reason="等的人已回复"), evidence,
+                       before={"state": "WAITING"}, after={"state": "READY"})
+            out["state"] = "READY"
+        return out
 
     # --------------------------------------------------------- responsibility
     def op_assign_responsibility(self, op: dict, evidence: str) -> dict:
