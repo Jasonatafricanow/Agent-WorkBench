@@ -1,17 +1,19 @@
 # Agent WorkBench — 独立的多 Agent 工作台
 
+> **Standalone SQL-backed workflow and task workbench for multi-agent hosts.**  
+> `main` now holds the modular `src/workdesk/` SQLite backend, progressive delegation (`ADR-0003`), five-view read-only work/life dashboard, `pi-workbot` host reference, and **172 passing offline tests** (`quality` CI green; merged via [#1](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/1), [#4](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/4), [#5](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/5)). Live Telegram bot-token deployment and `MR-Mem` compilation pointer consumption remain in progress ([MR-Mem #22](https://github.com/Jasonatafricanow/MR-Mem/pull/22), open drafts [#2](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/2) / [#3](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/3)).
+
 **首先阅读：[责任转移与人类参与核心设计 ADR-0003](docs/ADR-0003-PROGRESSIVE-DELEGATION.md)**，然后阅读 [总体蓝图、设计推导与整体框架](docs/PROJECT_BLUEPRINT.md)（为什么这样分工、数据流、状态机、模块依赖、故障与分阶段实施）。对应的跨仓边界见 [协作协议矩阵](docs/CROSS_REPO_INTERFACE_MATRIX.md)。
 
-**GitHub 开发状态：正式架构与模块接口已建立；生产接线未完成。**
+**GitHub 开发状态：领域内核、HTTP/看板与工作 bot 框架已合入 `main`；真实 Telegram 接线与 MR-Mem 编译消费未完成。**
 
 工作台是持续运转的个人工作系统：人类是工作循环中的一等参与者，但不是系统持续推进的前置条件；已授权工作在用户离线时继续，需人工判断的事项进入持久 Human Action Inbox。Progressive Delegation 允许按工作类别和证据逐步转移执行责任。SQL 记录项目、任务、执行历史、责任分配、授权范围、延期原因、等待对象与提醒；MR-Mem 提供经宿主授权的用户语义上下文，不能替代 SQL 当前任务状态。Telegram 接收需求和进度，Agent 通过固定工具门面操作，Dashboard 只读。
 
 ## 分支与仓库
 
-- WorkBench 分支：`feat/modular-backend-20261116`
-- MR-Mem 对接分支：`feat/workbench-user-context-20261116`
-- Draft PR：#1（此仓库）；MR-Mem #22
-- `main` 目前为初始化基线，勿将开发分支误认为已上线
+- `main`：已合入模块化后端与只读看板（[#1](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/1)、[#4](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/4)、[#5](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/5)），`quality` 工作流 172 项离线测试通过
+- MR-Mem 对接分支：`feat/workbench-user-context-20261116`（Draft PR：[MR-Mem #22](https://github.com/Jasonatafricanow/MR-Mem/pull/22)）
+- 后续看板与状态指示增量草稿：[#2](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/2)、[#3](https://github.com/Jasonatafricanow/Agent-WorkBench/pull/3)（注意区分已合入基线与真实生产上线）
 
 ## 新增核心架构（2026-11-17）
 
@@ -49,7 +51,7 @@
 
 ## 下一步的真实工程工作
 
-将已形成的领域内核参考实现逐模块迁入本仓库，重点是 SQL 事务状态机、task_events、幂等与版本冲突、requester 作用域、dependency/reminder、outbox。随后接入已认证 Telegram Bot、MR-Mem Host Adapter、调度守护进程与只读 Dashboard，再做 NAS 部署。**上述事项未接通前不能声称交付完整生产系统。**
+模块化的 SQL 事务状态机、`task_events`、幂等与版本冲突、requester 作用域、dependency/reminder、outbox、HTTP 接口与只读 Dashboard 已合入 `main`。后续真实接线重点是接入真实 Telegram Bot Token、消费 `memory_outbox` 对接 MR-Mem 编译层、消息附件与撤回处理，以及完整生产部署验收。**上述事项未全部接通前不能声称交付完整生产系统。**
 
 ## 验证
 
