@@ -256,6 +256,17 @@ class WorkbenchApp:
 
     def owner_form(self, form: dict) -> str:
         """Run one owner form; returns the success message (raises WorkbenchError on refusal)."""
+        if form.get("action") == "approval":
+            approve_raw = form.get("approve")
+            if approve_raw not in ("0", "1"):
+                raise InvalidOperation("approve must be 0 or 1", field="approve")
+            approve = approve_raw == "1"
+            res = self.approvals.decide(
+                approver=self.owner_actor, approval_id=form.get("approval_id", ""),
+                approve=approve, source_ref=f"owner-web:{form.get('nonce', '')}")
+            if res["status"] == "expired":
+                return "该审批已过期"
+            return "已批准" if approve else "已拒绝"
         from contextlib import closing
         from zoneinfo import ZoneInfo
         from .owner_ui import assignable, operations
@@ -323,20 +334,23 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
             owner = who == "owner"
             csrf = csrf_value(app.owner_token) if owner else ""
             try:
-                quick, people, recent = "", [], []
+                quick, people, recent, proj_list = "", [], [], []
                 if owner and (route.startswith("/task/") or route in ("/", "/dashboard")):
                     with closing(connect(app.db)) as conn:
                         people = assignable(conn, actor.workspace_id)
                         recent = [r[0] for r in conn.execute(
                             """SELECT holder_name FROM dependencies WHERE workspace_id=? AND holder_name IS NOT NULL
                                GROUP BY holder_name ORDER BY MAX(created_at) DESC LIMIT 12""", (actor.workspace_id,))]
+                        proj_list = [(r[0], r[1]) for r in conn.execute(
+                            "SELECT id, title FROM projects WHERE workspace_id=? AND state='active' ORDER BY title",
+                            (actor.workspace_id,))]
                     quick = quick_add_form(csrf, back=route if route.startswith("/task/") else "/", people=people,
-                                           recent=recent)
+                                           recent=recent, projects=proj_list)
                 if route.startswith("/task/"):
                     page = render_task(app.tasks, actor, app.db, route[len("/task/"):], now,
-                                       owner_panel=(lambda t, slot, tz: task_panel(csrf, dict(t, people=people, recent=recent), slot, tz))
+                                       owner_panel=(lambda t, slot, tz: task_panel(csrf, dict(t, people=people, recent=recent, projects=proj_list), slot, tz))
                                        if owner else None,
-                                       notice=notice(q) if owner else "", owner_html=quick)
+                                       notice=notice(q) if owner else "", owner_html=quick, owner_csrf=csrf)
                 elif route == "/calendar":
                     page = render_calendar(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"),
                                            owner=owner, **narrow)
@@ -349,7 +363,7 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
                     page = render_life(actor, app.db, now, app.life, owner=owner)
                 else:
                     page = render_dashboard(app.tasks, actor, app.db, now, owner_html=quick,
-                                            notice=notice(q) if owner else "")
+                                            notice=notice(q) if owner else "", owner_csrf=csrf)
             except WorkbenchError as exc:
                 return self._send(404 if exc.code in ("NOT_FOUND", "FORBIDDEN") else 400, {"code": exc.code})
             self._send(200, page.encode("utf-8"), "text/html")

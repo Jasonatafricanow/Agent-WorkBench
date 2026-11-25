@@ -18,7 +18,7 @@ from . import views
 from .errors import Forbidden
 from .insights import schedule_load, stagnation
 from .storage import connect
-from .owner_ui import FORM_CSS
+from .owner_ui import FORM_CSS, approval_buttons, human_action_form, today_focus_button
 from .panel_base import PB_CSS, hub
 from .task_service import SqliteTaskService
 
@@ -96,6 +96,13 @@ section.alert{border-color:var(--warn);margin-bottom:10px}section.alert h3{font-
 .pane section.owner h2{font-size:13px;color:var(--muted)}
 .pane details.edit summary{cursor:pointer;font-size:13px;color:var(--muted);margin:10px 0 4px}
 .pane section.owner{margin-top:22px;border-top:1px solid var(--line);border-radius:0;border-left:0;border-right:0;border-bottom:0;padding:16px 0 0}
+.cal-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.cal-head{font-size:12px;color:var(--muted);font-weight:600;padding:4px 6px;text-align:center}
+.cal-cell{background:var(--card);border:1px solid var(--line);border-radius:var(--pb-r);padding:8px;min-height:92px;font-size:12px}
+.cal-cell.today{border-color:var(--accent);box-shadow:inset 0 2px 0 var(--accent)}
+.cal-cell .d{display:flex;justify-content:space-between;align-items:center;font-weight:600;margin-bottom:4px}
+.cal-pad{border:1px dashed var(--line);border-radius:var(--pb-r);min-height:92px;opacity:.4}
+@media (max-width:720px){.cal-grid{grid-template-columns:1fr}.cal-head,.cal-pad{display:none}}
 @media (max-width:860px){.mail{display:flex;flex-direction:column;min-height:0}.rail{border-right:0;border-bottom:1px solid var(--line);max-height:none}
   .mail.has-sel .pane{order:-1;border-bottom:1px solid var(--line)}.pane{padding:16px}.slots{grid-template-columns:1fr}main{padding:12px}}
 """
@@ -303,7 +310,7 @@ def _rail(ov, actor, names, tz, now, selected, quick_add) -> str:
     return "<aside class=rail>" + "".join(html) + "</aside>"
 
 
-def _today_pane(ov, recent, stuck, load, tz, names) -> str:
+def _today_pane(ov, recent, stuck, load, tz, names, *, owner_csrf: str = "") -> str:
     focus = [(s, ov["focus"].get(s)) for s in ("NOW", "NEXT1", "NEXT2")]
     if any(t for _, t in focus):
         slots = "".join(f"<a class=slot href='/task/{e(t['id'])}'><b>{s}</b>{e(t['title'])}</a>" if t else
@@ -319,18 +326,28 @@ def _today_pane(ov, recent, stuck, load, tz, names) -> str:
         bits = [f"优先级：{pri}", *([f"截止 {e(due)}"] if due else [])]
         last_note = (t.get("done_summary") or "").strip().splitlines()
         resume = f"<div class=meta>上次记下：{e(last_note[-1])}</div>" if last_note else ""
-        return f"<a href='/task/{e(t['id'])}'>{e(t['title'])}</a><div class=meta>{' · '.join(bits)}</div>{resume}"
+        btn = today_focus_button(owner_csrf, t["id"]) if owner_csrf else ""
+        return f"<a href='/task/{e(t['id'])}'>{e(t['title'])}</a><div class=meta>{' · '.join(bits)}</div>{resume}{btn}"
 
     next_items = ov.get("next_for_owner") or []
     next_html = (f"<h3 class=sub-h>接下来（按紧迫度排序）</h3>{_list(next_items[:8], next_item)}"
                  if next_items else "")
+
+    def approval_item(a):
+        exp = f" · 到期 {_local(a['expires_at'], tz)}" if a["expires_at"] else ""
+        act = approval_buttons(owner_csrf, a["id"]) if owner_csrf else ""
+        return f"{e(a['request_summary'])}<div class=meta>/approve {e(a['id'])}{exp}</div>{act}"
+
+    def human_item(h):
+        due = f" · 截止 {_local(h['due_at'], tz)}" if h["due_at"] else ""
+        act = human_action_form(owner_csrf, h["id"]) if owner_csrf else ""
+        return f"{e(h['title'])}<div class=meta>{e(h['request_kind'])} · {e(h['urgency'])}{due}</div>{act}"
+
     attention = [
-        ("待审批", ov["my_approvals"], lambda a: f"{e(a['request_summary'])}<div class=meta>/approve {e(a['id'])}"
-                                              f"{' · 到期 ' + _local(a['expires_at'], tz) if a['expires_at'] else ''}</div>"),
+        ("待审批", ov["my_approvals"], approval_item),
         ("结果不明、需要核对", ov["unknown_outcomes"], lambda u: f"{e(u['kind'])} · {e(u['id'])}"
                                                          f"<div class=meta>{_local(u['updated_at'], tz)}</div>"),
-        ("需要我处理", ov["my_human_actions"], lambda h: f"{e(h['title'])}<div class=meta>{e(h['request_kind'])} · "
-                                                    f"{e(h['urgency'])}{' · 截止 ' + _local(h['due_at'], tz) if h['due_at'] else ''}</div>"),
+        ("需要我处理", ov["my_human_actions"], human_item),
         ("承诺", ov["commitments_open"], lambda c: f"{e(c['promise_text'])}<div class=meta>"
                                                   f"{'我欠' if c['direction'] == 'owner_owes' else '欠我' if c['direction'] == 'owed_to_owner' else '他人'}"
                                                   f" · {e(c.get('due_local') or _local(c['due_at'], tz))}</div>"),
@@ -408,7 +425,7 @@ def _task_pane(view, actor, names, tz, now, panel) -> str:
 
 
 def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str = "", selected: str | None = None,
-                     owner_panel=None, notice: str = "") -> str:
+                     owner_panel=None, notice: str = "", owner_csrf: str = "") -> str:
     """owner_html: the owner's quick-add form (empty on the read-only view). With `selected`, the right pane is
     that task; owner_panel(task, focus_slot, tz) -> its owner forms, or None on the read-only view."""
     tz, names = _ctx(actor, database)
@@ -428,7 +445,7 @@ def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str =
         recent = [i for i in views.timeline(database, actor=actor, start=since, end=_plus_seconds(now, 1), limit=40)["items"]
                   if i["type"] == "task_event"]
         right = _today_pane(ov, recent, stagnation(database, actor=actor, now=now),
-                            schedule_load(database, actor=actor, now=now), tz, names)
+                            schedule_load(database, actor=actor, now=now), tz, names, owner_csrf=owner_csrf)
     body = (f"<div class='mail{' has-sel' if selected else ''}'>{_rail(ov, actor, names, tz, now, selected, owner_html)}"
             f"<section class=pane>{notice}{right}</section></div>")
     return _page(title, "work", body, now, tz, owner=bool(owner_html) or owner_panel is not None, wide=True)
@@ -436,10 +453,10 @@ def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str =
 
 # ----------------------------------------------------------------------------------- Task
 def render_task(tasks, actor, database: str, task_id: str, now: str, *, owner_panel=None, notice: str = "",
-                owner_html: str = "") -> str:
+                owner_html: str = "", owner_csrf: str = "") -> str:
     """The work page with this task open on the right."""
     return render_dashboard(tasks, actor, database, now, owner_html=owner_html, selected=task_id,
-                            owner_panel=owner_panel, notice=notice)
+                            owner_panel=owner_panel, notice=notice, owner_csrf=owner_csrf)
 
 
 # ------------------------------------------------------------------------------- Calendar
@@ -467,17 +484,35 @@ def render_calendar(tasks, actor, database: str, now: str, *, range_kind: str = 
         extra = f" · 给 {e(names.get(i.get('recipient_id'), ''))}" if i["type"] == "follow_up" else ""
         return f"<span class='tag {cls}'>{label}</span><a href='{target}'>{e(i['title'])}</a><span class=meta> {when}{extra}</span>"
 
+    head = _pills("/calendar", range_kind, (("week", "本周"), ("month", "本月")), {"project": project, "requester": requester})
+    form = _filters("/calendar", actor, database, {"project": project, "requester": requester}, {"range": range_kind})
+    if range_kind == "month":
+        today = _today(now, tz)
+        headers = "".join(f"<div class=cal-head>周{w}</div>" for w in "一二三四五六日")
+        pads_before = "<div class=cal-pad></div>" * first.weekday()
+        cells, day = [], first
+        while day < after:
+            key = day.isoformat()
+            info = weight.get(key)
+            badge = (f"<span class='{'warn' if info['overloaded'] else 'meta'}'>负荷 {info['load']}</span>" if info else "")
+            items_html = _list(by_day.get(key, []), item, empty="") if by_day.get(key) else ""
+            cells.append(f"<div class='cal-cell{' today' if day == today else ''}'><div class=d><span>{day.day} 日"
+                         f"{' · 今天' if day == today else ''}</span>{badge}</div>{items_html}</div>")
+            day += timedelta(days=1)
+        last_wd = (after - timedelta(days=1)).weekday()
+        pads_after = "<div class=cal-pad></div>" * (6 - last_wd)
+        grid = f"<div class=cal-grid>{headers}{pads_before}{''.join(cells)}{pads_after}</div>"
+        return _page("日历", "calendar", head + form + grid, now, tz,
+                     sub="官方 DDL 不会被排期建议移动；Soft Due 的调整只是建议", owner=owner, wide=True)
+
     rows, day = [], first
     while day < after:
         key = day.isoformat()
         info = weight.get(key)
         badge = (f" <span class='{'warn' if info['overloaded'] else 'meta'}'>工作量 {info['load']}</span>" if info else "")
-        if by_day.get(key) or range_kind == "week":
-            rows.append(f"<section><h2>{key} 周{'一二三四五六日'[day.weekday()]}{badge}</h2>"
-                        f"{_list(by_day.get(key, []), item, empty='空')}</section>")
+        rows.append(f"<section><h2>{key} 周{'一二三四五六日'[day.weekday()]}{badge}</h2>"
+                    f"{_list(by_day.get(key, []), item, empty='空')}</section>")
         day += timedelta(days=1)
-    head = _pills("/calendar", range_kind, (("week", "本周"), ("month", "本月")), {"project": project, "requester": requester})
-    form = _filters("/calendar", actor, database, {"project": project, "requester": requester}, {"range": range_kind})
     body = head + form + (f"<div class=grid>{''.join(rows)}</div>" if rows else '<p class="empty">这段时间没有期限和提醒</p>')
     return _page("日历", "calendar", body, now, tz, sub="官方 DDL 不会被排期建议移动；Soft Due 的调整只是建议", owner=owner)
 

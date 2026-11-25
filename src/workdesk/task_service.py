@@ -1401,7 +1401,7 @@ class _Batch:
         # The response re-enters the work loop as a durable wake event in the same transaction. Answered
         # inside a live chat Run (a Host source), that Run already carries on: the event is recorded as
         # handled inline instead of starting a second Run that would repeat the same follow-up.
-        inline = self.actor.source != "cli"
+        inline = self.actor.source not in ("cli", "owner")
         wake_id = self.s._new_id("wake")
         self.c.execute(
             """INSERT INTO wake_events(id,workspace_id,task_id,origin,origin_event_id,kind,source_ref,status,
