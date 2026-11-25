@@ -1,6 +1,4 @@
 // Minimal client for the WorkBench Host API. Token and URL come from env; never logged.
-const BASE = (process.env.WORKBENCH_URL || 'http://127.0.0.1:8790').replace(/\/$/, '');
-const TOKEN = process.env.WORKBENCH_HOST_TOKEN || '';
 export const WORKSPACE = process.env.WORKBENCH_WORKSPACE || '';
 
 export class WorkbenchError extends Error {
@@ -8,10 +6,13 @@ export class WorkbenchError extends Error {
 }
 
 export async function wb(path, body = {}, { timeoutMs = 15000 } = {}) {
-  const response = await fetch(BASE + path, {
+  const base = (process.env.WORKBENCH_URL || 'http://127.0.0.1:8790').replace(/\/$/, '');
+  const token = process.env.WORKBENCH_HOST_TOKEN || '';
+  const workspace = process.env.WORKBENCH_WORKSPACE || WORKSPACE;
+  const response = await fetch(base + path, {
     method: 'POST',
-    headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ workspace_id: WORKSPACE, ...body }),
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace_id: workspace, ...body }),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const data = await response.json().catch(() => ({}));

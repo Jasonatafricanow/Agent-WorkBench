@@ -26,7 +26,7 @@ from .approvals import ApprovalService
 from .contracts import ActorContext
 from .dispatcher import Dispatcher
 from .errors import Forbidden, InvalidOperation, NotFound, WorkbenchError
-from .identity import SqlIdentityProvider, finish_inbound, record_edit, record_inbound
+from .identity import SqlIdentityProvider, finish_inbound, record_edit, record_inbound, record_retract
 from .insights import schedule_load, stagnation
 from . import views
 from .outboxes import DeliveryOutbox, MemoryPointerQueue
@@ -81,10 +81,14 @@ class WorkbenchApp:
         routes: dict[str, Callable[[], Any]] = {
             "/v1/intake/inbound": lambda: record_inbound(self.db, clock=self.clock, **{k: body[k] for k in (
                 "workspace_id", "platform", "bot_id", "update_id", "chat_id", "message_id",
-                "external_user_id", "raw_source_ref")}, handled_inline=bool(body.get("handled_inline", True))),
+                "external_user_id", "raw_source_ref")}, handled_inline=bool(body.get("handled_inline", True)),
+                attachments=body.get("attachments")),
             "/v1/intake/edited": lambda: record_edit(self.db, clock=self.clock, **{k: body[k] for k in (
                 "workspace_id", "platform", "bot_id", "update_id", "chat_id", "message_id",
                 "external_user_id", "raw_source_ref")}),
+            "/v1/intake/retracted": lambda: record_retract(self.db, clock=self.clock, **{k: body[k] for k in (
+                "workspace_id", "platform", "bot_id", "update_id", "chat_id", "message_id",
+                "raw_source_ref")}, external_user_id=body.get("external_user_id")),
             "/v1/companion/message": lambda: self.companion_message(body),
             "/v1/intake/finish":lambda: finish_inbound(self.db, workspace_id=ws, inbox_id=body["inbox_id"],
                                                         ok=bool(body.get("ok")), clock=self.clock),
@@ -316,6 +320,12 @@ class WorkbenchApp:
             return message
         from zoneinfo import ZoneInfo
         from .owner_ui import assignable, operations
+        if action == "add_watch" and not (form.get("version") or "").isdigit() and form.get("task_id"):
+            with closing(connect(self.db)) as conn:
+                trow = conn.execute("SELECT version FROM tasks WHERE workspace_id=? AND id=?",
+                                    (ws, form["task_id"])).fetchone()
+            if trow is not None:
+                form = dict(form, version=str(trow["version"]))
         with closing(connect(self.db)) as conn:
             row = conn.execute("SELECT timezone FROM workspaces WHERE id=?", (ws,)).fetchone()
             people = dict(assignable(conn, ws))
@@ -336,12 +346,12 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
     """host_api=False: the LAN listener — dashboard pages and /status/v1 only, no POST at all, so the
     Host API (the only write path) never leaves loopback."""
     from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse
-    from .dashboard import (render_calendar, render_dashboard, render_life, render_projects, render_task,
-                            render_timeline)
+    from .dashboard import (render_calendar, render_dashboard, render_life, render_projects, render_schedules,
+                            render_task, render_timeline)
     from contextlib import closing
     from .owner_ui import assignable, csrf_value, notice, quick_add_form, task_panel
     from .storage import connect
-    pages = {"/calendar", "/timeline", "/projects", "/life"}
+    pages = {"/calendar", "/timeline", "/projects", "/schedules", "/life"}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "WorkBench/1"
@@ -418,6 +428,9 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
                 elif route == "/projects":
                     page = render_projects(app.tasks, actor, app.db, now, owner=owner,
                                            owner_csrf=csrf, notice=notice(q) if owner else "", **narrow)
+                elif route == "/schedules":
+                    page = render_schedules(app.tasks, actor, app.db, now, project=narrow["project"],
+                                            owner=owner, owner_csrf=csrf, notice=notice(q) if owner else "")
                 elif route == "/life":
                     page = render_life(actor, app.db, now, app.life, owner=owner)
                 else:

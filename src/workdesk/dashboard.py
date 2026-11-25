@@ -19,9 +19,11 @@ from .errors import Forbidden, NotFound
 from .insights import schedule_load, stagnation
 from .storage import connect
 from .owner_ui import (
-    FORM_CSS, PROJECT_STATE_LABELS, REMINDER_KIND_LABELS, adopt_soft_due_button, approval_buttons,
-    cancel_reminder_button, commitment_buttons, human_action_form, project_create_form, project_edit_form,
-    reconcile_unknown_form, resolve_dep_button, today_focus_button,
+    FORM_CSS, FREQ_LABELS, PROJECT_STATE_LABELS, REMINDER_KIND_LABELS, WATCH_KIND_LABELS,
+    adopt_soft_due_button, approval_buttons, cancel_reminder_button, commitment_buttons,
+    human_action_form, project_create_form, project_edit_form, reconcile_unknown_form,
+    resolve_dep_button, schedule_create_form, schedule_toggle_button, today_focus_button,
+    watch_cancel_button, watch_create_form,
 )
 from .panel_base import PB_CSS, hub
 from .task_service import SqliteTaskService
@@ -116,18 +118,18 @@ section.alert{border-color:var(--warn);margin-bottom:10px}section.alert h3{font-
 """
 
 NAV = (("work", "/", "工作台"), ("calendar", "/calendar", "日历"), ("timeline", "/timeline", "时间线"),
-       ("projects", "/projects", "项目池"), ("life", "/life", "生活"))
+       ("projects", "/projects", "项目池"), ("schedules", "/schedules", "周期与监控"), ("life", "/life", "生活"))
 
 KIND_LABELS = {
     "created": "创建", "patched": "修改", "delayed": "延期", "state_changed": "状态", "progress": "进展",
     "focus_set": "放入焦点", "focus_cleared": "移出焦点", "dependency_added": "开始等待", "dependency_resolved": "等待解除",
     "reminder_set": "设提醒", "reminder_cancelled": "取消提醒", "source_linked": "关联消息", "source_edited": "原消息被编辑",
-    "human_action_requested": "请人处理", "human_action_responded": "人已回复", "responsibility_changed": "委托变化",
-    "official_due_set": "官方截止", "commitment_recorded": "记下承诺", "commitment_updated": "承诺变化",
-    "deliverable_registered": "登记交付物", "deliverable_submitted": "交付", "deliverable_acknowledged": "对方已收到",
-    "deliverable_accepted": "交付已验收", "deliverable_rejected": "交付被退回", "deliverable_review_required": "交付需修改",
-    "checkpoint_saved": "工作书签", "watch_added": "外部监控", "external_change": "外部变化", "requester_note": "请求方备注",
-    "handoff": "交接",
+    "source_retracted": "原消息已撤回", "human_action_requested": "请人处理", "human_action_responded": "人已回复",
+    "responsibility_changed": "委托变化", "official_due_set": "官方截止", "commitment_recorded": "记下承诺",
+    "commitment_updated": "承诺变化", "deliverable_registered": "登记交付物", "deliverable_submitted": "交付",
+    "deliverable_acknowledged": "对方已收到", "deliverable_accepted": "交付已验收", "deliverable_rejected": "交付被退回",
+    "deliverable_review_required": "交付需修改", "checkpoint_saved": "工作书签", "watch_added": "外部监控",
+    "watch_cancelled": "取消监控", "external_change": "外部变化", "requester_note": "请求方备注", "handoff": "交接",
 }
 STATE_LABELS = {"INBOX": "新进", "READY": "可做", "DOING": "进行中", "WAITING": "等待", "BLOCKED": "阻塞",
                 "DONE": "完成", "CANCELLED": "取消"}
@@ -597,10 +599,28 @@ def _task_pane(view, actor, names, tz, now, panel, *, owner_csrf: str = "", watc
 
     watch_html = ""
     if watches:
-        watch_row = lambda w: (f"{e(w['source_kind'])} · {e(w['target_ref'])}"
-                               f"<div class=meta>期望 {e(w['expected_value'])} · 当前 "
-                               f"{e(w.get('last_observed_value') or '未观测')} · {e(w['status'])}</div>")
+        def watch_row(w):
+            act = (watch_cancel_button(owner_csrf, w["id"], t["id"], t["version"], back=back)
+                   if owner_csrf and w["status"] == "watching" else "")
+            return (f"{e(w['source_kind'])} · {e(w['target_ref'])}"
+                    f"<div class=meta>期望 {e(w['expected_value'])} · 当前 "
+                    f"{e(w.get('last_observed_value') or '未观测')} · {e(w['status'])}</div>{act}")
         watch_html = f"<h3 class=sub-h>外部监控</h3>{_list(watches, watch_row)}"
+
+    sources = view.get("sources") or []
+    src_html = ""
+    if sources:
+        def src_row(s):
+            badge = "<span class='chip bad'>已撤回失效</span> " if s.get("retracted_at") else ""
+            rev = f" · 已编辑 v{s['revision']}" if (s.get("revision") or 1) > 1 else ""
+            sender = names.get(s.get("sender_principal_id"), s.get("sender_principal_id") or "")
+            atts = s.get("attachments") or []
+            att_list = "".join(
+                f"<div class=meta>📎 {e(a['kind'])}{' · ' + e(a['file_name']) if a.get('file_name') else ''}"
+                f" ({e(a['file_ref'])})</div>" for a in atts)
+            return (f"{badge}{e(s['relation'])} · {e(sender)} · <span class=meta>{e(s['raw_source_ref'])}</span>"
+                    f"<div class=meta>{_local(s['received_at'], tz)}{rev}</div>{att_list}")
+        src_html = f"<h3 class=sub-h>关联消息与附件</h3>{_list(sources, src_row)}"
 
     steps = []
     for ev in view["events"]:
@@ -620,7 +640,7 @@ def _task_pane(view, actor, names, tz, now, panel, *, owner_csrf: str = "", watc
     return (f"<div class=head><div><h2>{e(t['title'])}</h2><div class=who>{who_html}</div></div>"
             f"<div class=chips>{focus}<span class='chip {chip}'>{e(state)}</span></div></div>{wait}"
             f"{'<dl class=facts>' + facts_html + '</dl>' if facts_html else ''}"
-            f"{deps_html}{resp_html}{rem_html}{com_html}{dlv_html}{watch_html}"
+            f"{deps_html}{resp_html}{rem_html}{com_html}{dlv_html}{watch_html}{src_html}"
             f"<h3 class=sub-h>经过</h3><ol class=thread>{''.join(steps)}</ol>{bookmark}{panel}")
 
 
@@ -647,7 +667,7 @@ def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str =
             panel = owner_panel(dict(view["task"], open_dependencies=opened,
                                      holder=_holder(opened, actor, names),
                                      responsibility=view.get("responsibility")), slot, tz)
-        watches = _watches_for(database, actor.workspace_id, selected)
+        watches = view.get("watches") or ()
         right = _task_pane(view, actor, names, tz, now, panel, owner_csrf=owner_csrf, watches=watches, back=back_url)
     else:
         since = (datetime.fromisoformat(now[:-1]) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -808,6 +828,53 @@ def render_projects(tasks, actor, database: str, now: str, *, project: str | Non
     create = project_create_form(owner_csrf, back="/projects") if owner_csrf else ""
     body = notice + create + form + (f"<div class=grid>{''.join(card(p) for p in pool)}</div>" if pool else '<p class="empty">没有项目</p>')
     return _page("项目池", "projects", body, now, tz, owner=owner)
+
+
+# ------------------------------------------------------------------------------ Schedules & Watches
+def render_schedules(tasks, actor, database: str, now: str, *, project: str | None = None,
+                     owner: bool = False, owner_csrf: str = "", notice: str = "") -> str:
+    tz, _ = _ctx(actor, database)
+    data = views.schedules(database, actor=actor, project_id=project)
+    projects = _workspace_projects(database, actor.workspace_id, project)
+    proj_map = dict(projects)
+
+    def sched_card(s):
+        tpl = s.get("template") or {}
+        freq = FREQ_LABELS.get(s["frequency"], s["frequency"])
+        every = f"每 {s['interval_n']} 次 · " if (s.get("interval_n") or 1) > 1 else ""
+        st_tag = f"<span class='tag {'ok' if s['active'] else ''}'>{'启用' if s['active'] else '停用'}</span>"
+        lim = f" / {s['max_occurrences']}" if s.get("max_occurrences") else ""
+        proj_line = f" · 项目 {e(proj_map.get(tpl.get('project_id'), tpl.get('project_id')))}" if tpl.get("project_id") else ""
+        btn = schedule_toggle_button(owner_csrf, s["id"], bool(s["active"]), back="/schedules") if owner_csrf else ""
+        return (f"{st_tag}<b>{e(s['title'])}</b>"
+                f"<div class=meta>{every}{e(freq)} {e(s['local_time'])} · 下次 {e(s['next_fire_local'])}"
+                f" · 已触发 {s['occurrences']}{lim} 次{proj_line}</div>{btn}")
+
+    def watch_card(w):
+        k = WATCH_KIND_LABELS.get(w["source_kind"], w["source_kind"])
+        tlink = f"<a href='/task/{e(w['task_id'])}'>{e(w.get('task_title') or w['task_id'])}</a> · " if w.get("task_id") else ""
+        btn = (watch_cancel_button(owner_csrf, w["id"], w.get("task_id"), w.get("task_version"), back="/schedules")
+               if owner_csrf and w["status"] == "watching" else "")
+        return (f"{tlink}{e(k)} · {e(w['target_ref'])}"
+                f"<div class=meta>期望 {e(w['expected_value'])} · 当前 {e(w.get('last_observed_value') or '未观测')}"
+                f" · {e(w['status'])}</div>{btn}")
+
+    create_forms = ""
+    if owner_csrf:
+        with closing(connect(database)) as conn:
+            open_tasks = [(r[0], r[1]) for r in conn.execute(
+                "SELECT id, title FROM tasks WHERE workspace_id=? AND state NOT IN ('DONE','CANCELLED') ORDER BY updated_at DESC, title LIMIT 100",
+                (actor.workspace_id,))]
+        create_forms = schedule_create_form(owner_csrf, projects, back="/schedules")
+        if open_tasks:
+            create_forms += watch_create_form(owner_csrf, open_tasks, back="/schedules")
+
+    proj_opts = "".join(f"<option value='{e(pid)}'{' selected' if project == pid else ''}>{e(pt)}</option>" for pid, pt in projects)
+    filt = f"<form class=filters method=get action='/schedules'><label>项目 <select name=project><option value=''>全部</option>{proj_opts}</select></label><button type=submit>筛选</button></form>"
+    body = (f"{notice}{create_forms}{filt}"
+            f"<div class=grid><section><h2>周期任务规则</h2>{_list(data['schedules'], sched_card, empty='还没有周期任务')}</section>"
+            f"<section><h2>外部监控</h2>{_list(data['watches'], watch_card, empty='还没有外部监控')}</section></div>")
+    return _page("周期与监控", "schedules", body, now, tz, owner=owner)
 
 
 # ----------------------------------------------------------------------------------- Life

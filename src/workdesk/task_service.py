@@ -214,6 +214,23 @@ class SqliteTaskService:
                                ORDER BY recorded_at,id""",
                             (actor.workspace_id, task_id, actor.principal_id))]}
             ws = actor.workspace_id
+            src_rows = conn.execute(
+                """SELECT ml.relation, i.id, i.platform, i.bot_id, i.sender_principal_id, i.raw_source_ref,
+                          i.revision, i.received_at, i.edited_at, i.retracted_at, i.retracted_source_ref
+                   FROM message_links ml JOIN inbox_messages i
+                     ON i.workspace_id=ml.workspace_id AND i.id=ml.inbox_id
+                   WHERE ml.workspace_id=? AND ml.task_id=? ORDER BY i.received_at, ml.relation""",
+                (ws, task_id)).fetchall()
+            att_map: dict[str, list[dict]] = {}
+            if src_rows:
+                in_ids = list({r["id"] for r in src_rows})
+                marks = ",".join("?" * len(in_ids))
+                for att in conn.execute(
+                        f"""SELECT id, inbox_id, kind, file_name, mime_type, file_size, file_ref, caption, created_at
+                            FROM inbox_attachments WHERE workspace_id=? AND inbox_id IN ({marks})
+                            ORDER BY created_at, rowid""", (ws, *in_ids)):
+                    att_map.setdefault(att["inbox_id"], []).append(dict(att))
+            sources = [dict(r) | {"attachments": att_map.get(r["id"], [])} for r in src_rows]
             return {
                 "view": "full",
                 "task": dict(task),
@@ -237,6 +254,10 @@ class SqliteTaskService:
                 "deliverables": [dict(r) for r in conn.execute(
                     "SELECT * FROM deliverables WHERE workspace_id=? AND task_id=? ORDER BY created_at,id",
                     (ws, task_id))],
+                "watches": [dict(r) for r in conn.execute(
+                    "SELECT * FROM external_watches WHERE workspace_id=? AND task_id=? ORDER BY created_at,id",
+                    (ws, task_id))],
+                "sources": sources,
                 "latest_checkpoint": self._row_dict(conn.execute(
                     """SELECT * FROM work_checkpoints WHERE workspace_id=? AND task_id=?
                        ORDER BY created_at DESC, rowid DESC LIMIT 1""", (ws, task_id)).fetchone()),
@@ -606,7 +627,8 @@ class _Batch:
         ref = op.get(ref_field)
         row = ref and self.c.execute(
             """SELECT i.sender_principal_id, p.kind FROM inbox_messages i JOIN principals p ON p.id=i.sender_principal_id
-               WHERE i.workspace_id=? AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r
+               WHERE i.workspace_id=? AND i.retracted_at IS NULL
+                 AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r
                     WHERE r.inbox_id=i.id AND r.raw_source_ref=?))""", (self.ws, ref, ref)).fetchone()
         ok = row is not None and ((sender is not None and row["sender_principal_id"] == sender)
                                   or (any_human and row["kind"] == "human"))
@@ -933,8 +955,8 @@ class _Batch:
                         (self.ws,))}
                 said_at = self.c.execute(
                     """SELECT MAX(COALESCE(i.edited_at, i.received_at)) FROM inbox_messages i WHERE i.workspace_id=?
-                       AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r WHERE r.inbox_id=i.id
-                            AND r.raw_source_ref=?))""", (self.ws, op["source_ref"], op["source_ref"])).fetchone()[0]
+                       AND i.retracted_at IS NULL AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r
+                            WHERE r.inbox_id=i.id AND r.raw_source_ref=?))""", (self.ws, op["source_ref"], op["source_ref"])).fetchone()[0]
                 if sender not in allowed or not row["submitted_at"] or said_at < row["submitted_at"]:
                     raise EvidenceRequired(f"marking a deliverable {status} needs a message from the person it was "
                                            "delivered to, sent after it was submitted")
@@ -1031,6 +1053,21 @@ class _Batch:
         return {"task_id": task["id"], "watch_id": watch_id,
                 "event_id": self.event(task["id"], "watch_added", op, evidence,
                                        after={"watch_id": watch_id, "dependency_id": dep_id, **values})}
+
+    def op_cancel_watch(self, op: dict, evidence: str) -> dict:
+        wid = self.ref(op.get("watch_id"))
+        row = self.c.execute("SELECT * FROM external_watches WHERE workspace_id=? AND id=?", (self.ws, wid)).fetchone()
+        if row is None:
+            raise NotFound("watch not found")
+        if row["status"] != "watching":
+            raise InvalidOperation(f"watch is {row['status']}, not watching")
+        task = self.task(dict(op, task_id=row["task_id"])) if row["task_id"] else None
+        self.c.execute("UPDATE external_watches SET status='cancelled', updated_at=? WHERE id=?", (self.now, wid))
+        out = {"watch_id": wid, "status": "cancelled"}
+        if task is not None:
+            out["task_id"] = task["id"]
+            out["event_id"] = self.event(task["id"], "watch_cancelled", op, evidence, after={"watch_id": wid})
+        return out
 
     # --------------------------------------------- proposals, projects, handoff
     def op_propose_change(self, op: dict, evidence: str) -> dict:

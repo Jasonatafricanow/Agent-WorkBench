@@ -191,10 +191,13 @@ def _fire_rule(conn, rule, now: str) -> list[dict]:
                         (rule["id"], local)).fetchone() is None:
             task_id = _new("task")
             title = f"{template.get('title') or rule['title']}（{local[:10]}）"
+            pid = template.get("project_id")
+            if pid and not conn.execute("SELECT 1 FROM projects WHERE workspace_id=? AND id=?", (ws, pid)).fetchone():
+                pid = None
             conn.execute(
-                """INSERT INTO tasks(id,workspace_id,title,goal,next_action,state,priority,assignee_id,
-                     soft_due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                (task_id, ws, title, template.get("goal", ""), template.get("next_action", ""),
+                """INSERT INTO tasks(id,workspace_id,project_id,title,goal,next_action,state,priority,assignee_id,
+                     soft_due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (task_id, ws, pid, title, template.get("goal", ""), template.get("next_action", ""),
                  "READY", int(template.get("priority", 2)), owner,
                  at if template.get("due_at_occurrence") else None, now, now))
             _task_event(conn, ws, task_id, rule["created_by_principal_id"], "created",

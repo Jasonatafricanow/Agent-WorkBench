@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { wb } from './workbench-client.mjs';
 import { getTurn } from './turn-context.mjs';
+import { RETRY_FILE, retryMemoryWrites } from './memory-retry.mjs';
 
 const require = createRequire((process.env.PI_RUNTIME || '/opt/xiyue-runtime') + '/package.json');
 const { Type } = require('typebox');
@@ -13,32 +14,7 @@ const MEM = (process.env.MRMEM_URL || 'http://127.0.0.1:8880').replace(/\/$/, ''
 const MEM_SCOPE = process.env.WORKBOT_MEMORY_SCOPE || 'workbench';
 const AGENT_IDENTITY = { provider: 'host', bot_id: process.env.WORKBOT_BOT_ID || 'workbot',
   external_user_id: process.env.WORKBOT_AGENT_EXTERNAL_ID || 'agent' };
-export const RETRY_FILE = path.join(process.env.WORKBOT_WORK_DIR || '/workbot/workspace', 'memory-retry.jsonl');
-
-// Replay queued memory writes (called by the gateway loop). Keeps lines that still fail.
-export async function retryMemoryWrites() {
-  if (!fs.existsSync(RETRY_FILE)) return 0;
-  const lines = fs.readFileSync(RETRY_FILE, 'utf8').split('\n').filter(Boolean);
-  const left = [];
-  for (const line of lines) {
-    try {
-      const { path: p, body, identity } = JSON.parse(line);
-      // Re-check the grant at replay time: a revoked grant drops the queued write.
-      const allowed = await wb('/v1/memory/authorize', { identity: identity || AGENT_IDENTITY, action: 'memory.write' })
-        .then(() => true).catch(error => (error.status === 403 ? false : null));
-      if (allowed === false) continue;
-      if (allowed === null) { left.push(line); continue; }
-      const response = await fetch(MEM + p, { method: 'POST', signal: AbortSignal.timeout(8000),
-        headers: { Authorization: 'Bearer ' + (process.env.MRMEM_TOKEN || ''), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body) });
-      // 4xx: MR-Mem rejected the write itself; replaying it unchanged can never succeed.
-      if (response.status >= 400 && response.status < 500) { console.error('memory write dropped:', response.status); continue; }
-      if (!response.ok) left.push(line);
-    } catch { left.push(line); }
-  }
-  fs.writeFileSync(RETRY_FILE, left.length ? left.join('\n') + '\n' : '');
-  return lines.length - left.length;
-}
+export { RETRY_FILE, retryMemoryWrites };
 const out = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }], details: {} });
 
 export function createWorkbenchTools(sessionManager) {
@@ -93,7 +69,7 @@ export function createWorkbenchTools(sessionManager) {
       parameters: Type.Object({ task_id: Type.String({ minLength: 1 }) }),
       execute: async (_id, { task_id }) => call('/v1/tools/get_task', { task_id }) },
     { name: 'change_tasks', label: '更新工作台',
-      description: 'Apply 1-40 operations atomically (all or nothing). Ops: create_task, patch_task, set_official_due, transition, append_progress, set_focus(owner), add_dependency, resolve_dependency, set_reminder, cancel_reminder, link_inbox, request_human_action, respond_human_action, record_commitment, update_commitment, register_deliverable, update_deliverable, save_checkpoint, create_schedule, set_schedule_active, add_watch, assign_responsibility(owner), set_responsibility_status(owner), propose_change, create_project, update_project, handoff. add_dependency kind: external_response|prerequisite_task|artifact|permission|other. set_reminder accepts repeat_every_days + max_repeats for chasing until answered. Every op needs evidence_type (explicit_user|verified_tool|reported_third_party|inferred|system). Use "ref" to name a new object and "$ref" to use it later in the batch.',
+      description: 'Apply 1-40 operations atomically (all or nothing). Ops: create_task, patch_task, set_official_due, transition, append_progress, set_focus(owner), add_dependency, resolve_dependency, set_reminder, cancel_reminder, link_inbox, request_human_action, respond_human_action, record_commitment, update_commitment, register_deliverable, update_deliverable, save_checkpoint, create_schedule, set_schedule_active, add_watch, cancel_watch, assign_responsibility(owner), set_responsibility_status(owner), propose_change, create_project, update_project, handoff. add_dependency kind: external_response|prerequisite_task|artifact|permission|other. set_reminder accepts repeat_every_days + max_repeats for chasing until answered. Every op needs evidence_type (explicit_user|verified_tool|reported_third_party|inferred|system). Use "ref" to name a new object and "$ref" to use it later in the batch.',
       parameters: Type.Object({ operations: Type.Array(Type.Record(Type.String(), Type.Any()), { minItems: 1, maxItems: 40 }) }),
       execute: async (toolCallId, { operations }) => {
         const current = turn();

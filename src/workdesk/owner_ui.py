@@ -27,6 +27,8 @@ PROJECT_STATE_LABELS = {"active": "进行中", "paused": "暂停", "done": "完�
 DELAY_LABELS = {"external_wait": "等外部", "reprioritized": "调整优先级", "underestimated": "低估了工作量",
                 "blocked": "被阻塞", "unavailable": "没空", "scope_changed": "范围变了", "other": "其他"}
 REMINDER_KIND_LABELS = {"followup": "跟进催促", "official_due": "官方截止前", "soft_due": "内部节点前", "checkin": "进展确认"}
+FREQ_LABELS = {"daily": "每天", "weekly": "每周", "monthly": "每月"}
+WATCH_KIND_LABELS = {"github_ci": "GitHub CI", "github_pr": "GitHub PR"}
 
 
 def e(value) -> str:
@@ -193,6 +195,51 @@ def project_edit_form(csrf: str, project: dict, back: str = "/projects") -> str:
             f"{_post(csrf, back, inner, action='update_project', project_id=project['id'])}</details></div>")
 
 
+def schedule_create_form(csrf: str, projects: list[tuple[str, str]] = (), back: str = "/schedules") -> str:
+    freqs = "".join(f"<option value={k}>{lbl}</option>" for k, lbl in FREQ_LABELS.items())
+    proj = _project_select(projects) if projects else ""
+    priorities = "".join(f"<option value={p}{' selected' if p == 2 else ''}>优先级 {p}</option>" for p in range(5))
+    inner = (f"<input type=text name=title placeholder='周期任务名称' required maxlength=200>"
+             f"<select name=frequency aria-label='频率'>{freqs}</select>"
+             "<input type=number name=interval min=1 max=365 value=1 aria-label='间隔'>"
+             "<label class=meta>开始日期 <input type=date name=start_local_date required></label>"
+             "<label class=meta>时间 <input type=time name=local_time value='09:00' required></label>"
+             f"{proj}<input type=text name=next_action placeholder='默认下一步（可选）' maxlength=400>"
+             f"<input type=text name=goal placeholder='默认目标（可选）' maxlength=400>"
+             f"<select name=priority>{priorities}</select>"
+             "<input type=number name=max_occurrences min=1 max=500 placeholder='总次数上限（可空）'>"
+             "<label class=meta><input type=checkbox name=due_at_occurrence value=1 checked> 触发时刻记为期望完成</label>"
+             "<button class=primary>新建周期任务</button>")
+    return f"<section class=owner style='margin-bottom:12px'><h2>新建周期任务</h2>{_post(csrf, back, inner, action='create_schedule')}</section>"
+
+
+def schedule_toggle_button(csrf: str, schedule_id: str, active_now: bool, back: str = "/schedules") -> str:
+    label = "停用" if active_now else "恢复启用"
+    target = "0" if active_now else "1"
+    cls = "danger" if active_now else "primary"
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='toggle_schedule', schedule_id=schedule_id, active=target)}"
+            f"<button class={cls}>{label}</button></form>")
+
+
+def watch_create_form(csrf: str, tasks: list[tuple[str, str]], back: str = "/schedules") -> str:
+    task_opts = "".join(f"<option value='{e(tid)}'>{e(title)}</option>" for tid, title in tasks)
+    kinds = "".join(f"<option value={k}>{lbl}</option>" for k, lbl in WATCH_KIND_LABELS.items())
+    inner = (f"<select name=task_id required aria-label='关联任务'><option value=''>选择关联任务</option>{task_opts}</select>"
+             f"<select name=source_kind aria-label='监控类型'>{kinds}</select>"
+             "<input type=text name=target_ref placeholder='owner/repo@ref 或 owner/repo#123' required maxlength=200>"
+             "<input type=text name=expected_value placeholder='期望状态（如 success / merged）' required maxlength=80>"
+             "<button class=primary>添加监控</button>")
+    return f"<section class=owner style='margin-bottom:12px'><h2>添加外部监控</h2>{_post(csrf, back, inner, action='add_watch')}</section>"
+
+
+def watch_cancel_button(csrf: str, watch_id: str, task_id: str | None, version: int | None, back: str = "/schedules") -> str:
+    extra = {"task_id": task_id, **({"version": version} if version is not None else {})} if task_id else {}
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='cancel_watch', watch_id=watch_id, **extra)}"
+            "<button>停止监控</button></form>")
+
+
 def quick_add_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = (), recent: list[str] = (),
                    projects: list[tuple[str, str]] = ()) -> str:
     """The work page's one-line add: a title and who does it; the rest folds away. Handing it to someone works like
@@ -316,6 +363,20 @@ def task_panel(csrf: str, task: dict, focus_slot: str | None, tz: ZoneInfo) -> s
         "<button>登记</button>",
         action="register_deliverable", **common) + "</details>"
 
+    w_kinds = "".join(f"<option value={k}>{lbl}</option>" for k, lbl in WATCH_KIND_LABELS.items())
+    dep_sel = ""
+    if task.get("open_dependencies"):
+        dep_opts = "".join(f"<option value='{e(d['id'])}'>{e(d['awaited_outcome'])}</option>"
+                           for d in task["open_dependencies"])
+        dep_sel = f"<select name=dependency_id aria-label='解除关联等待'><option value=''>仅记录事件（不绑等待）</option>{dep_opts}</select>"
+    watch_form = "<details class=edit><summary>添加外部监控 (GitHub CI / PR)</summary>" + _post(
+        csrf, back,
+        f"<select name=source_kind aria-label='监控类型'>{w_kinds}</select>"
+        "<input type=text name=target_ref placeholder='owner/repo@ref 或 owner/repo#123' required maxlength=200>"
+        "<input type=text name=expected_value placeholder='期望值（如 success / merged）' required maxlength=80>"
+        f"{dep_sel}<button>加监控</button>",
+        action="add_watch", **common) + "</details>"
+
     resp = task.get("responsibility")
     resp_controls = ""
     if resp and resp.get("status") in ("active", "paused"):
@@ -332,7 +393,7 @@ def task_panel(csrf: str, task: dict, focus_slot: str | None, tz: ZoneInfo) -> s
         resp_controls = f"<div class=meta>委托控制</div>{resp_controls}"
 
     return (f"<section class=owner><h2>处理</h2>{progress}{who}{hand}<div class=row>{take}{buttons}</div>{reasoned}"
-            f"<div class=meta>焦点</div><div class=row>{focus}</div>{resp_controls}{edit}{rem_form}{com_form}{dlv_form}</section>")
+            f"<div class=meta>焦点</div><div class=row>{focus}</div>{resp_controls}{edit}{rem_form}{com_form}{dlv_form}{watch_form}</section>")
 
 
 def _holder_of(form: dict, people: dict[str, str] | None) -> tuple[str | None, str] | None:
@@ -540,6 +601,44 @@ def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None,
         return [{"op": "register_deliverable", "task_id": form.get("task_id"), "expected_version": version,
                  "title": form.get("title", ""), "artifact_ref": form.get("artifact_ref", ""), **base,
                  "reason": "主人在网页工作台登记交付物"}], "已登记交付物"
+    if action == "create_schedule":
+        interval_raw = (form.get("interval") or "1").strip()
+        if not interval_raw.isdigit() or int(interval_raw) < 1:
+            raise InvalidOperation("间隔必须是正整数", field="interval")
+        tpl = {"priority": int(form.get("priority") or 2),
+               "due_at_occurrence": form.get("due_at_occurrence") == "1"}
+        if (form.get("goal") or "").strip():
+            tpl["goal"] = form["goal"].strip()
+        if (form.get("next_action") or "").strip():
+            tpl["next_action"] = form["next_action"].strip()
+        if (form.get("project_id") or "").strip():
+            tpl["project_id"] = form["project_id"].strip()
+        op = {"op": "create_schedule", "title": form.get("title", ""), "frequency": form.get("frequency") or "",
+              "interval": int(interval_raw), "local_time": (form.get("local_time") or "").strip(),
+              "start_local_date": (form.get("start_local_date") or "").strip(), "template": tpl, **base,
+              "reason": "主人在网页工作台建周期任务"}
+        max_occ = (form.get("max_occurrences") or "").strip()
+        if max_occ:
+            if not max_occ.isdigit() or int(max_occ) < 1:
+                raise InvalidOperation("总次数上限必须是正整数", field="max_occurrences")
+            op["max_occurrences"] = int(max_occ)
+        return [op], "已新建周期任务"
+    if action == "toggle_schedule":
+        active = form.get("active") == "1"
+        return [{"op": "set_schedule_active", "schedule_id": form.get("schedule_id"), "active": active,
+                 **base, "reason": "主人在网页工作台启用周期" if active else "主人在网页工作台停用周期"}], (
+            "已启用周期任务" if active else "已停用周期任务")
+    if action == "add_watch":
+        op = {"op": "add_watch", "task_id": form.get("task_id"), "expected_version": version,
+              "source_kind": form.get("source_kind", ""), "target_ref": form.get("target_ref", ""),
+              "expected_value": form.get("expected_value", ""), **base, "reason": "主人在网页工作台加外部监控"}
+        if (form.get("dependency_id") or "").strip():
+            op["dependency_id"] = form["dependency_id"].strip()
+        return [op], "已添加外部监控"
+    if action == "cancel_watch":
+        return [{"op": "cancel_watch", "watch_id": form.get("watch_id"),
+                 **({"task_id": form["task_id"], "expected_version": version} if form.get("task_id") else {}),
+                 **base, "reason": "主人在网页工作台停止外部监控"}], "已停止监控"
     if action == "responsibility_status":
         status = form.get("status", "")
         why = reason or {"paused": "主人在网页工作台暂停委托", "active": "主人在网页工作台恢复委托",
