@@ -25,7 +25,7 @@ from typing import Any, Callable
 from .approvals import ApprovalService
 from .contracts import ActorContext
 from .dispatcher import Dispatcher
-from .errors import Forbidden, InvalidOperation, WorkbenchError
+from .errors import Forbidden, InvalidOperation, NotFound, WorkbenchError
 from .identity import SqlIdentityProvider, finish_inbound, record_edit, record_inbound
 from .insights import schedule_load, stagnation
 from . import views
@@ -256,7 +256,11 @@ class WorkbenchApp:
 
     def owner_form(self, form: dict) -> str:
         """Run one owner form; returns the success message (raises WorkbenchError on refusal)."""
-        if form.get("action") == "approval":
+        from contextlib import closing
+        from .storage import connect
+        action = form.get("action")
+        ws = self.owner_actor.workspace_id
+        if action == "approval":
             approve_raw = form.get("approve")
             if approve_raw not in ("0", "1"):
                 raise InvalidOperation("approve must be 0 or 1", field="approve")
@@ -267,14 +271,56 @@ class WorkbenchApp:
             if res["status"] == "expired":
                 return "该审批已过期"
             return "已批准" if approve else "已拒绝"
-        from contextlib import closing
+        if action == "reconcile_wake":
+            status = form.get("status")
+            if status not in ("completed", "failed"):
+                raise InvalidOperation("status must be completed or failed", field="status")
+            event_id = (form.get("event_id") or "").strip()
+            with closing(connect(self.db)) as conn:
+                row = conn.execute("SELECT status FROM wake_events WHERE workspace_id=? AND id=?",
+                                   (ws, event_id)).fetchone()
+            if row is None:
+                raise NotFound("wake event not found")
+            if row["status"] != "unknown":
+                raise InvalidOperation(f"wake event is already {row['status']}")
+            self.dispatcher.settle(ws, event_id, HostOutcome(status, f"owner-web:{form.get('nonce', '')}"))
+            return "已核实完成" if status == "completed" else "已核实失败"
+        if action == "reconcile_delivery":
+            status = form.get("status")
+            if status not in ("sent", "failed"):
+                raise InvalidOperation("status must be sent or failed", field="status")
+            delivery_id = (form.get("delivery_id") or "").strip()
+            receipt = (form.get("receipt") or "").strip() or None
+            with closing(connect(self.db)) as conn:
+                row = conn.execute("SELECT status FROM delivery_outbox WHERE workspace_id=? AND id=?",
+                                   (ws, delivery_id)).fetchone()
+            if row is None:
+                raise NotFound("delivery not found")
+            if row["status"] != "unknown":
+                raise InvalidOperation(f"delivery is already {row['status']}")
+            self.delivery.settle(workspace_id=ws, delivery_id=delivery_id, status=status, provider_message_id=receipt)
+            return "已核实发出" if status == "sent" else "已标记失败"
+        if action == "human_apply":
+            from .owner_ui import apply_human_request_ops
+            hid = (form.get("human_action_id") or "").strip()
+            with closing(connect(self.db)) as conn:
+                req_row = conn.execute("SELECT * FROM human_action_requests WHERE workspace_id=? AND id=?",
+                                       (ws, hid)).fetchone()
+                if req_row is None or req_row["assignee_principal_id"] != self.owner_actor.principal_id:
+                    raise NotFound("human action request not found")
+                task_row = (conn.execute("SELECT * FROM tasks WHERE workspace_id=? AND id=?",
+                                         (ws, req_row["task_id"])).fetchone()
+                            if req_row["task_id"] else None)
+            ops, message = apply_human_request_ops(req_row, task_row, form)
+            self.tasks.apply(actor=self.owner_actor, idempotency_key=f"owner-web:{form.get('nonce', '')}", operations=ops)
+            return message
         from zoneinfo import ZoneInfo
         from .owner_ui import assignable, operations
-        from .storage import connect
         with closing(connect(self.db)) as conn:
-            row = conn.execute("SELECT timezone FROM workspaces WHERE id=?", (self.owner_actor.workspace_id,)).fetchone()
-            people = dict(assignable(conn, self.owner_actor.workspace_id))
-        ops, message = operations(form, ZoneInfo(row["timezone"] if row else "Asia/Shanghai"), people)
+            row = conn.execute("SELECT timezone FROM workspaces WHERE id=?", (ws,)).fetchone()
+            people = dict(assignable(conn, ws))
+        ops, message = operations(form, ZoneInfo(row["timezone"] if row else "Asia/Shanghai"),
+                                  people, owner_id=self.owner_actor.principal_id)
         self.tasks.apply(actor=self.owner_actor, idempotency_key=f"owner-web:{form.get('nonce', '')}", operations=ops)
         return message
 
@@ -289,8 +335,7 @@ def _event_dict(event):
 def make_handler(app: WorkbenchApp, *, host_api: bool = True):
     """host_api=False: the LAN listener — dashboard pages and /status/v1 only, no POST at all, so the
     Host API (the only write path) never leaves loopback."""
-    from urllib.parse import parse_qs
-    from urllib.parse import quote, urlparse
+    from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse
     from .dashboard import (render_calendar, render_dashboard, render_life, render_projects, render_task,
                             render_timeline)
     from contextlib import closing
@@ -331,10 +376,11 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
             q = {k: v[0] for k, v in parse_qs(query).items() if v and v[0]}
             actor, now = app.dashboard_actor, app.clock()
             narrow = {"project": q.get("project"), "requester": q.get("requester")}
+            search = q.get("q", "")
             owner = who == "owner"
             csrf = csrf_value(app.owner_token) if owner else ""
             try:
-                quick, people, recent, proj_list = "", [], [], []
+                quick, people, recent, proj_list, team, all_members = "", [], [], [], [], []
                 if owner and (route.startswith("/task/") or route in ("/", "/dashboard")):
                     with closing(connect(app.db)) as conn:
                         people = assignable(conn, actor.workspace_id)
@@ -344,13 +390,25 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
                         proj_list = [(r[0], r[1]) for r in conn.execute(
                             "SELECT id, title FROM projects WHERE workspace_id=? AND state='active' ORDER BY title",
                             (actor.workspace_id,))]
-                    quick = quick_add_form(csrf, back=route if route.startswith("/task/") else "/", people=people,
-                                           recent=recent, projects=proj_list)
+                        team = [(r[0], r[1]) for r in conn.execute(
+                            """SELECT p.id, p.display_name FROM memberships m JOIN principals p ON p.id=m.principal_id
+                               WHERE m.workspace_id=? AND m.active=1 AND p.active=1 AND m.role IN ('owner','editor')
+                               ORDER BY m.role='owner' DESC, p.display_name""", (actor.workspace_id,))]
+                        all_members = [(r[0], r[1]) for r in conn.execute(
+                            """SELECT p.id, p.display_name FROM memberships m JOIN principals p ON p.id=m.principal_id
+                               WHERE m.workspace_id=? AND m.active=1 AND p.active=1 ORDER BY p.display_name""",
+                            (actor.workspace_id,))]
+                    filter_qs = urlencode({k: v for k, v in (("q", search.strip()), ("project", narrow["project"])) if v})
+                    back_path = (route if route.startswith("/task/") else "/") + (f"?{filter_qs}" if filter_qs else "")
+                    quick = quick_add_form(csrf, back=back_path, people=people, recent=recent, projects=proj_list)
                 if route.startswith("/task/"):
                     page = render_task(app.tasks, actor, app.db, route[len("/task/"):], now,
-                                       owner_panel=(lambda t, slot, tz: task_panel(csrf, dict(t, people=people, recent=recent, projects=proj_list), slot, tz))
+                                       owner_panel=(lambda t, slot, tz: task_panel(csrf, dict(
+                                           t, people=people, recent=recent, projects=proj_list, team=team,
+                                           all_members=all_members, owner_id=actor.principal_id), slot, tz))
                                        if owner else None,
-                                       notice=notice(q) if owner else "", owner_html=quick, owner_csrf=csrf)
+                                       notice=notice(q) if owner else "", owner_html=quick, owner_csrf=csrf,
+                                       search=search, project=narrow["project"])
                 elif route == "/calendar":
                     page = render_calendar(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"),
                                            owner=owner, **narrow)
@@ -358,12 +416,14 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
                     page = render_timeline(app.tasks, actor, app.db, now, range_kind=q.get("range", "week"),
                                            owner=owner, **narrow)
                 elif route == "/projects":
-                    page = render_projects(app.tasks, actor, app.db, now, owner=owner, **narrow)
+                    page = render_projects(app.tasks, actor, app.db, now, owner=owner,
+                                           owner_csrf=csrf, notice=notice(q) if owner else "", **narrow)
                 elif route == "/life":
                     page = render_life(actor, app.db, now, app.life, owner=owner)
                 else:
                     page = render_dashboard(app.tasks, actor, app.db, now, owner_html=quick,
-                                            notice=notice(q) if owner else "", owner_csrf=csrf)
+                                            notice=notice(q) if owner else "", owner_csrf=csrf,
+                                            search=search, project=narrow["project"])
             except WorkbenchError as exc:
                 return self._send(404 if exc.code in ("NOT_FOUND", "FORBIDDEN") else 400, {"code": exc.code})
             self._send(200, page.encode("utf-8"), "text/html")
@@ -390,8 +450,11 @@ def make_handler(app: WorkbenchApp, *, host_api: bool = True):
                 result = "err=" + quote(str(exc)[:300])
             except (ValueError, TypeError, KeyError) as exc:
                 result = "err=" + quote(str(exc)[:200])
+            parsed = urlparse(back)
+            clean_qs = [(k, v) for k, v in parse_qsl(parsed.query) if k not in ("ok", "err")]
+            qs = urlencode(clean_qs) + ("&" if clean_qs else "") + result
             self.send_response(303)
-            self.send_header("Location", f"{back.split('?')[0]}?{result}")
+            self.send_header("Location", f"{parsed.path or '/'}?{qs}")
             self.send_header("Content-Length", "0")
             self.end_headers()
 

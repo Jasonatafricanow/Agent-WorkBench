@@ -15,10 +15,14 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from . import views
-from .errors import Forbidden
+from .errors import Forbidden, NotFound
 from .insights import schedule_load, stagnation
 from .storage import connect
-from .owner_ui import FORM_CSS, approval_buttons, human_action_form, today_focus_button
+from .owner_ui import (
+    FORM_CSS, PROJECT_STATE_LABELS, REMINDER_KIND_LABELS, adopt_soft_due_button, approval_buttons,
+    cancel_reminder_button, commitment_buttons, human_action_form, project_create_form, project_edit_form,
+    reconcile_unknown_form, resolve_dep_button, today_focus_button,
+)
 from .panel_base import PB_CSS, hub
 from .task_service import SqliteTaskService
 
@@ -67,6 +71,10 @@ main.wide{max-width:1360px}
 .quick details{flex:1 1 100%;font-size:12px;color:var(--muted)}.quick details summary{cursor:pointer;padding:2px 0}
 .quick details .more{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.quick details .more>*{flex:1 1 140px}
 .quick label{display:flex;flex-direction:column;gap:2px}
+.rail-filter{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.rail-filter input,.rail-filter select,.rail-filter button{font:inherit;font-size:12px;height:28px;padding:0 8px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:var(--pb-r)}
+.rail-filter input[type=search]{flex:1 1 120px;min-width:0}
+.rail-filter a{font-size:12px;color:var(--muted)}
 .pane{padding:22px 28px;border:0;border-radius:0;min-width:0}
 .pane .head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:12px}
 .pane h2{font-size:22px;color:var(--ink);margin:0 0 6px;font-weight:600}
@@ -133,6 +141,35 @@ def _ctx(actor, database):
             """SELECT p.id, p.display_name FROM principals p JOIN memberships m ON m.principal_id=p.id
                WHERE m.workspace_id=?""", (actor.workspace_id,))}
     return tz, names
+
+
+def _workspace_projects(database, workspace_id: str, project_id: str | None = None) -> list[tuple[str, str]]:
+    with closing(connect(database)) as conn:
+        if project_id is not None and not conn.execute(
+                "SELECT 1 FROM projects WHERE workspace_id=? AND id=?", (workspace_id, project_id)).fetchone():
+            raise NotFound("project not found")
+        return [(r[0], r[1]) for r in conn.execute(
+            "SELECT id, title FROM projects WHERE workspace_id=? ORDER BY state='done', state='cancelled', title",
+            (workspace_id,))]
+
+
+def _task_meta(database, workspace_id: str, task_ids: set[str]) -> dict[str, dict]:
+    ids = [tid for tid in task_ids if tid]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    with closing(connect(database)) as conn:
+        return {r["id"]: dict(r) for r in conn.execute(
+            f"""SELECT id, title, version, soft_due_at, official_due_at, official_due_local
+                FROM tasks WHERE workspace_id=? AND id IN ({marks})""", (workspace_id, *ids))}
+
+
+def _watches_for(database, workspace_id: str, task_id: str) -> list[dict]:
+    with closing(connect(database)) as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT id, source_kind, target_ref, expected_value, last_observed_value, status, updated_at
+               FROM external_watches WHERE workspace_id=? AND task_id=? ORDER BY created_at, id""",
+            (workspace_id, task_id))]
 
 
 def _local(ts: str | None, tz: ZoneInfo, fmt="%m-%d %H:%M") -> str:
@@ -261,13 +298,31 @@ def _holder(deps, actor, names) -> str | None:
     return None
 
 
-def _rail(ov, actor, names, tz, now, selected, quick_add) -> str:
+def _matches_rail(t: dict, names: dict, search: str, project: str | None) -> bool:
+    if project and t.get("project_id") != project:
+        return False
+    if not search:
+        return True
+    term = search.lower()
+    hay = [
+        t.get("title") or "", t.get("next_action") or "", t.get("done_summary") or "",
+        names.get(t.get("requester_id"), ""), names.get(t.get("assignee_id"), ""),
+    ]
+    for dep in t.get("waiting_on") or ():
+        hay.append(dep.get("holder_name") or "")
+        hay.append(dep.get("awaited_outcome") or "")
+    return any(term in str(piece).lower() for piece in hay if piece)
+
+
+def _rail(ov, actor, names, tz, now, selected, quick_add, *, projects: list[tuple[str, str]] = (),
+          search: str = "", project: str | None = None, link_suffix: str = "") -> str:
     slot_of = {t["id"]: s for s, t in ov["focus"].items() if t}
+    keep = lambda list_items: [t for t in list_items if _matches_rail(t, names, search, project)]
 
     def item(t, meta, cls=""):
         sel = " sel" if t["id"] == selected else ""
         slot = f"<span class='chip do'>{e(slot_of[t['id']])}</span> " if t["id"] in slot_of else ""
-        return (f"<a class='it{cls}{sel}' href='/task/{e(t['id'])}'><span class=t>{slot}{e(t['title'])}</span>"
+        return (f"<a class='it{cls}{sel}' href='/task/{e(t['id'])}{link_suffix}'><span class=t>{slot}{e(t['title'])}</span>"
                 f"<span class=m>{meta}</span></a>")
 
     def due_or_age(t):
@@ -278,11 +333,11 @@ def _rail(ov, actor, names, tz, now, selected, quick_add) -> str:
         return f"期望 {e(soft)}" if soft else f"{_age(t.get('created_at'), now)}前记下"
 
     groups: list[tuple[str, str, list[str]]] = []
-    mine = ov["doing"] + ov["ready"]
+    mine = keep(ov["doing"] + ov["ready"])
     groups.append(("我在做", "", [item(t, f"{STATE_LABELS.get(t['state'], '')} · {due_or_age(t)}") for t in mine]))
     by_person: dict[str, list[str]] = {}
     outside: list[str] = []
-    for t in ov["waiting"]:
+    for t in keep(ov["waiting"]):
         since = min((d.get("created_at") or "" for d in t.get("waiting_on", [])), default="") or t.get("updated_at")
         holder = _holder(t.get("waiting_on", []), actor, names)
         if holder:
@@ -294,23 +349,75 @@ def _rail(ov, actor, names, tz, now, selected, quick_add) -> str:
         groups.append((f"在{e(person)}手上", "", rows))
     if outside:
         groups.append(("等外部条件", "", outside))
-    if ov["blocked"]:
-        groups.append(("阻塞", " bad", [item(t, e(t.get("next_action") or "阻塞中"), " b") for t in ov["blocked"]]))
-    if ov["overdue"]:
-        groups.append(("逾期", " bad", [item(t, due_or_age(t), " b") for t in ov["overdue"]]))
-    groups.append(("收件箱", "", [item(t, due_or_age(t)) for t in ov["inbox"]]))
+    blocked = keep(ov["blocked"])
+    if blocked:
+        groups.append(("阻塞", " bad", [item(t, e(t.get("next_action") or "阻塞中"), " b") for t in blocked]))
+    overdue = keep(ov["overdue"])
+    if overdue:
+        groups.append(("逾期", " bad", [item(t, due_or_age(t), " b") for t in overdue]))
+    inbox = keep(ov["inbox"])
+    groups.append(("收件箱", "", [item(t, due_or_age(t)) for t in inbox]))
 
-    html = [quick_add]
+    proj_opts = "".join(
+        f"<option value='{e(pid)}'{' selected' if project == pid else ''}>{e(ptitle)}</option>"
+        for pid, ptitle in projects)
+    proj_sel = f"<select name=project aria-label='按项目筛选'><option value=''>全项目</option>{proj_opts}</select>" if projects else ""
+    reset = "<a href='/'>重置</a>" if (search or project) else ""
+    filter_bar = (f"<form class=rail-filter method=get action='/'>"
+                  f"<input type=search name=q value='{e(search)}' placeholder='搜任务 / 经手人' aria-label='搜索任务'>"
+                  f"{proj_sel}<button type=submit>筛</button>{reset}</form>")
+
+    html = [quick_add, filter_bar]
     for title, cls, rows in groups:
         body = "".join(rows) or "<div class=none>（空）</div>"
         html.append(f"<h4 class='g{cls}'><span>{title}</span><span class=n>{len(rows)}</span></h4>{body}")
-    done = "".join(item(t, "完成") for t in ov["recently_done"])
+    done_list = keep(ov["recently_done"])
+    done = "".join(item(t, "完成") for t in done_list)
     if done:
-        html.append(f"<details class=done><summary>最近 7 天完成 {len(ov['recently_done'])} 件</summary>{done}</details>")
+        html.append(f"<details class=done><summary>最近 7 天完成 {len(done_list)} 件</summary>{done}</details>")
     return "<aside class=rail>" + "".join(html) + "</aside>"
 
 
-def _today_pane(ov, recent, stuck, load, tz, names, *, owner_csrf: str = "") -> str:
+def _human_detail(h: dict, names: dict) -> tuple[str, bool, bool]:
+    """Return (summary HTML, can_apply_proposal, needs_delay_kind)."""
+    try:
+        payload = json.loads(h.get("request_json") or "{}")
+    except ValueError:
+        payload = {}
+    kind = payload.get("kind")
+    bits: list[str] = []
+    can_apply, needs_delay = False, False
+    if payload.get("ask"):
+        bits.append(f"说明：{e(payload['ask'])}")
+    if kind == "proposed_change":
+        fields = payload.get("fields") or {}
+        curr = payload.get("current") or {}
+        diffs = []
+        for k, v in fields.items():
+            old_v = curr.get("official_due_local") or curr.get(k) if k == "official_due_local" else curr.get(k)
+            diffs.append(f"{e(k)}: {e(old_v if old_v not in (None, '') else '无')} → {e(v)}")
+            if k in ("official_due_local", "official_due_at", "soft_due_at"):
+                needs_delay = True
+        if diffs:
+            bits.append("提议变更：" + "；".join(diffs))
+        if payload.get("reason"):
+            bits.append(f"理由：{e(payload['reason'])}")
+        can_apply = bool(h.get("task_id") and fields)
+    elif kind == "import_due_changed":
+        bits.append(f"导入对比（{e(payload.get('external_key'))}）：{e(payload.get('current') or '无')} → {e(payload.get('imported'))}")
+        can_apply, needs_delay = bool(h.get("task_id") and payload.get("imported")), True
+    elif kind == "import_missing":
+        bits.append(f"导入表未再出现（{e(payload.get('external_key'))}），确认是否已结案")
+    elif kind == "promotion_review":
+        ev = payload.get("evidence") or {}
+        bits.append(f"建议升到 {e(payload.get('target_level'))}（成功 {ev.get('verified_successes', 0)}/{ev.get('completed_runs', 0)}，返工 {ev.get('rework_count', 0)}）")
+    detail = f"<div class=meta>{' · '.join(bits)}</div>" if bits else ""
+    return detail, can_apply, needs_delay
+
+
+def _today_pane(ov, recent, stuck, load, tz, names, *, owner_csrf: str = "", task_meta: dict | None = None,
+                back: str = "/") -> str:
+    task_meta = task_meta or {}
     focus = [(s, ov["focus"].get(s)) for s in ("NOW", "NEXT1", "NEXT2")]
     if any(t for _, t in focus):
         slots = "".join(f"<a class=slot href='/task/{e(t['id'])}'><b>{s}</b>{e(t['title'])}</a>" if t else
@@ -326,7 +433,7 @@ def _today_pane(ov, recent, stuck, load, tz, names, *, owner_csrf: str = "") -> 
         bits = [f"优先级：{pri}", *([f"截止 {e(due)}"] if due else [])]
         last_note = (t.get("done_summary") or "").strip().splitlines()
         resume = f"<div class=meta>上次记下：{e(last_note[-1])}</div>" if last_note else ""
-        btn = today_focus_button(owner_csrf, t["id"]) if owner_csrf else ""
+        btn = today_focus_button(owner_csrf, t["id"], back=back) if owner_csrf else ""
         return f"<a href='/task/{e(t['id'])}'>{e(t['title'])}</a><div class=meta>{' · '.join(bits)}</div>{resume}{btn}"
 
     next_items = ov.get("next_for_owner") or []
@@ -335,30 +442,63 @@ def _today_pane(ov, recent, stuck, load, tz, names, *, owner_csrf: str = "") -> 
 
     def approval_item(a):
         exp = f" · 到期 {_local(a['expires_at'], tz)}" if a["expires_at"] else ""
-        act = approval_buttons(owner_csrf, a["id"]) if owner_csrf else ""
-        return f"{e(a['request_summary'])}<div class=meta>/approve {e(a['id'])}{exp}</div>{act}"
+        tlink = f" · <a href='/task/{e(a['task_id'])}'>查看任务</a>" if a.get("task_id") else ""
+        act = approval_buttons(owner_csrf, a["id"], back=back) if owner_csrf else ""
+        return f"{e(a['request_summary'])}<div class=meta>/approve {e(a['id'])}{exp}{tlink}</div>{act}"
 
     def human_item(h):
         due = f" · 截止 {_local(h['due_at'], tz)}" if h["due_at"] else ""
-        act = human_action_form(owner_csrf, h["id"]) if owner_csrf else ""
-        return f"{e(h['title'])}<div class=meta>{e(h['request_kind'])} · {e(h['urgency'])}{due}</div>{act}"
+        tlink = f" · <a href='/task/{e(h['task_id'])}'>查看任务</a>" if h.get("task_id") else ""
+        detail, can_apply, needs_delay = _human_detail(h, names)
+        meta = task_meta.get(h.get("task_id") or "")
+        act = (human_action_form(owner_csrf, h["id"], back=back, can_apply=can_apply,
+                                 task_version=meta["version"] if meta else None, needs_delay_kind=needs_delay)
+               if owner_csrf else "")
+        return f"{e(h['title'])}<div class=meta>{e(h['request_kind'])} · {e(h['urgency'])}{due}{tlink}</div>{detail}{act}"
+
+    def unknown_item(u):
+        tlink = f" · <a href='/task/{e(u['task_id'])}'>查看任务</a>" if u.get("task_id") else ""
+        act = reconcile_unknown_form(owner_csrf, u, back=back) if owner_csrf else ""
+        return f"{e(u['kind'])} · {e(u['id'])}<div class=meta>{_local(u['updated_at'], tz)}{tlink}</div>{act}"
+
+    def commitment_item(c):
+        who = (f"我欠 {e(names.get(c['promisee_id'], c['promisee_id']))}" if c["direction"] == "owner_owes" and c.get("promisee_id")
+               else "我欠" if c["direction"] == "owner_owes"
+               else f"{e(names.get(c['promisor_id'], c['promisor_id']))} 欠我" if c["direction"] == "owed_to_owner"
+               else "他人承诺")
+        tlink = f"<a href='/task/{e(c['task_id'])}'>{e((task_meta.get(c['task_id']) or {}).get('title') or '任务')}</a> · " if c.get("task_id") else ""
+        meta = task_meta.get(c.get("task_id") or "")
+        act = (commitment_buttons(owner_csrf, c["id"], c["task_id"], meta["version"], back=back)
+               if owner_csrf and meta else "")
+        return f"{tlink}{e(c['promise_text'])}<div class=meta>{who} · {e(c.get('due_local') or _local(c['due_at'], tz))}</div>{act}"
+
+    def followup_item(r):
+        meta = task_meta.get(r["task_id"])
+        act = (cancel_reminder_button(owner_csrf, r["id"], r["task_id"], meta["version"], back=back)
+               if owner_csrf and meta else "")
+        return (f"<a href='/task/{e(r['task_id'])}'>{e(r['title'])}</a>"
+                f"<div class=meta>{_local(r['due_at'], tz)} · 给 {e(names.get(r['recipient_principal_id'], ''))}</div>{act}")
+
+    def suggestion_item(s):
+        meta = task_meta.get(s["task_id"])
+        act = ""
+        if owner_csrf and meta:
+            hhmm = _local(meta.get("soft_due_at"), tz, "%H:%M") or "18:00"
+            act = adopt_soft_due_button(owner_csrf, s["task_id"], meta["version"], f"{s['to']}T{hhmm}", s["to"], back=back)
+        return (f"<a href='/task/{e(s['task_id'])}'>{e(s['title'])}</a>"
+                f"<div class=meta>{e(s['from'])} → {e(s['to'])} · {e(s['basis'])}</div>{act}")
 
     attention = [
         ("待审批", ov["my_approvals"], approval_item),
-        ("结果不明、需要核对", ov["unknown_outcomes"], lambda u: f"{e(u['kind'])} · {e(u['id'])}"
-                                                         f"<div class=meta>{_local(u['updated_at'], tz)}</div>"),
+        ("结果不明、需要核对", ov["unknown_outcomes"], unknown_item),
         ("需要我处理", ov["my_human_actions"], human_item),
-        ("承诺", ov["commitments_open"], lambda c: f"{e(c['promise_text'])}<div class=meta>"
-                                                  f"{'我欠' if c['direction'] == 'owner_owes' else '欠我' if c['direction'] == 'owed_to_owner' else '他人'}"
-                                                  f" · {e(c.get('due_local') or _local(c['due_at'], tz))}</div>"),
-        ("交付物", ov["deliverables_pending"], lambda d: f"{e(d['title'])}<div class=meta>{e(d['status'])} · 第 {d['revision']} 版</div>"),
-        ("即将催促 / 提醒", ov["upcoming_followups"], lambda r: f"<a href='/task/{e(r['task_id'])}'>{e(r['title'])}</a>"
-                                                       f"<div class=meta>{_local(r['due_at'], tz)} · 给 {e(names.get(r['recipient_principal_id'], ''))}</div>"),
-        ("停滞与反复延期", stuck, lambda s: f"{e(s['title'])}<div class=meta>延期 {len(s['delays'])} 次</div>"),
+        ("承诺", ov["commitments_open"], commitment_item),
+        ("交付物", ov["deliverables_pending"], lambda d: f"<a href='/task/{e(d['task_id'])}'>{e(d['title'])}</a><div class=meta>{e(d['status'])} · 第 {d['revision']} 版</div>"),
+        ("即将催促 / 提醒", ov["upcoming_followups"], followup_item),
+        ("停滞与反复延期", stuck, lambda s: f"<a href='/task/{e(s['task_id'])}'>{e(s['title'])}</a><div class=meta>延期 {len(s['delays'])} 次</div>"),
         ("排期过载的日子", [d for d in load["days"] if d["overloaded"]],
          lambda d: f"{e(d['date'])}<div class=meta>工作量 {d['load']} 项</div>"),
-        ("排期建议（只动期望完成，需你确认）", load.get("suggestions", []),
-         lambda s: f"<a href='/task/{e(s['task_id'])}'>{e(s['title'])}</a><div class=meta>{e(s['from'])} → {e(s['to'])} · {e(s['basis'])}</div>"),
+        ("排期建议（只动期望完成，需你确认）", load.get("suggestions", []), suggestion_item),
     ]
     full = [(t, items, r) for t, items, r in attention if items]
     quiet = [t for t, items, _ in attention if not items]
@@ -383,8 +523,10 @@ def _source_word(ref: str | None) -> str:
     return ""
 
 
-def _task_pane(view, actor, names, tz, now, panel) -> str:
+def _task_pane(view, actor, names, tz, now, panel, *, owner_csrf: str = "", watches: list[dict] = (),
+               back: str = "") -> str:
     t = view["task"]
+    back = back or f"/task/{t['id']}"
     open_deps = [d for d in view["dependencies"] if d.get("status") == "open"]
     holder = _holder(open_deps, actor, names)
     state = STATE_LABELS.get(t["state"], t["state"])
@@ -399,10 +541,67 @@ def _task_pane(view, actor, names, tz, now, panel) -> str:
         what = "；".join(e(d["awaited_outcome"]) for d in open_deps)
         wait = (f"<div class=waitbox><span class=big>{_age(since, now)}</span><div><b>等{what}</b>"
                 f"<div class=meta>{_local(since, tz)} 开始等{' · 工作 bot 上线后会自动提醒对方' if holder else ''}</div></div></div>")
-    facts = [("下一步", t["next_action"]), ("目标", t["goal"]), ("期望完成", _local(t["soft_due_at"], tz)),
+    facts = [("下一步", t["next_action"]), ("目标", t["goal"]), ("计划开始", _local(t.get("planned_start_at"), tz)),
+             ("期望完成", _local(t["soft_due_at"], tz)),
              ("官方截止", t.get("official_due_local") or _local(t["official_due_at"], tz)), ("已做", t["done_summary"]),
              ("优先级", t.get("priority"))]
     facts_html = "".join(f"<div><dt>{k}</dt><dd>{e(v)}</dd></div>" for k, v in facts if v not in (None, ""))
+
+    deps_html = ""
+    if open_deps:
+        def dep_row(d):
+            who_d = d.get("holder_name") or names.get(d.get("responsible_principal_id"), "")
+            act = (resolve_dep_button(owner_csrf, d["id"], t["id"], t["version"],
+                                      auto_ready=(t["state"] == "WAITING" and len(open_deps) == 1), back=back)
+                   if owner_csrf else "")
+            return (f"{e(d['awaited_outcome'])}"
+                    f"<div class=meta>{e(d['kind'])}{' · ' + e(who_d) if who_d else ''} · {_local(d['created_at'], tz)}</div>{act}")
+        deps_html = f"<h3 class=sub-h>等待与依赖</h3>{_list(open_deps, dep_row)}"
+
+    resp = view.get("responsibility")
+    resp_html = ""
+    if resp:
+        r_status = {"active": "生效中", "paused": "已暂停", "revoked": "已撤回"}.get(resp["status"], resp["status"])
+        resp_html = (f"<h3 class=sub-h>委托状态</h3><div class=meta>执行：{e(names.get(resp['current_executor_id'], resp['current_executor_id']))} · "
+                     f"类别 {e(resp['work_class'])} · 级别 {e(resp['autonomy_level'])} · {e(r_status)}（v{resp['profile_version']}）</div>")
+
+    reminders = view.get("reminders") or []
+    rem_html = ""
+    if reminders:
+        def rem_row(r):
+            r_label = REMINDER_KIND_LABELS.get(r["kind"], r["kind"])
+            rep = f" · 剩余重复 {r['repeats_left']} 次" if r.get("repeats_left") else ""
+            act = (cancel_reminder_button(owner_csrf, r["id"], t["id"], t["version"], back=back)
+                   if owner_csrf and r["status"] == "scheduled" else "")
+            return (f"{_local(r['due_at'], tz)} · {e(r_label)} · 给 {e(names.get(r['recipient_principal_id'], r['recipient_principal_id']))}"
+                    f"<div class=meta>{e(r['status'])}{rep}</div>{act}")
+        rem_html = f"<h3 class=sub-h>提醒</h3>{_list(reminders, rem_row)}"
+
+    commitments = view.get("commitments") or []
+    com_html = ""
+    if commitments:
+        def com_row(c):
+            who_c = f"{e(names.get(c['promisor_id'], c['promisor_id']))} → {e(names.get(c['promisee_id'], c['promisee_id']) or '对方')}"
+            due_c = c.get("due_local") or _local(c.get("due_at"), tz)
+            act = (commitment_buttons(owner_csrf, c["id"], t["id"], t["version"], back=back)
+                   if owner_csrf and c["status"] == "open" else "")
+            return f"{e(c['promise_text'])}<div class=meta>{who_c} · {e(c['status'])}{' · 截止 ' + e(due_c) if due_c else ''}</div>{act}"
+        com_html = f"<h3 class=sub-h>承诺</h3>{_list(commitments, com_row)}"
+
+    deliverables = view.get("deliverables") or []
+    dlv_html = ""
+    if deliverables:
+        dlv_row = lambda d: (f"{e(d['title'])} · <span class=meta>{e(d['artifact_ref'])}</span>"
+                             f"<div class=meta>{e(d['status'])} · 第 {d['revision']} 版</div>")
+        dlv_html = f"<h3 class=sub-h>交付物</h3>{_list(deliverables, dlv_row)}"
+
+    watch_html = ""
+    if watches:
+        watch_row = lambda w: (f"{e(w['source_kind'])} · {e(w['target_ref'])}"
+                               f"<div class=meta>期望 {e(w['expected_value'])} · 当前 "
+                               f"{e(w.get('last_observed_value') or '未观测')} · {e(w['status'])}</div>")
+        watch_html = f"<h3 class=sub-h>外部监控</h3>{_list(watches, watch_row)}"
+
     steps = []
     for ev in view["events"]:
         cls = " w" if ev["kind"] in ("dependency_added", "human_action_requested") else ""
@@ -421,15 +620,23 @@ def _task_pane(view, actor, names, tz, now, panel) -> str:
     return (f"<div class=head><div><h2>{e(t['title'])}</h2><div class=who>{who_html}</div></div>"
             f"<div class=chips>{focus}<span class='chip {chip}'>{e(state)}</span></div></div>{wait}"
             f"{'<dl class=facts>' + facts_html + '</dl>' if facts_html else ''}"
+            f"{deps_html}{resp_html}{rem_html}{com_html}{dlv_html}{watch_html}"
             f"<h3 class=sub-h>经过</h3><ol class=thread>{''.join(steps)}</ol>{bookmark}{panel}")
 
 
 def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str = "", selected: str | None = None,
-                     owner_panel=None, notice: str = "", owner_csrf: str = "") -> str:
+                     owner_panel=None, notice: str = "", owner_csrf: str = "",
+                     search: str = "", project: str | None = None) -> str:
     """owner_html: the owner's quick-add form (empty on the read-only view). With `selected`, the right pane is
     that task; owner_panel(task, focus_slot, tz) -> its owner forms, or None on the read-only view."""
     tz, names = _ctx(actor, database)
-    ov = tasks.overview(actor=actor, limit=30)
+    search = (search or "").strip()
+    project = project or None
+    projects = _workspace_projects(database, actor.workspace_id, project)
+    ov = tasks.overview(actor=actor, limit=100)
+    qs = urlencode({k: v for k, v in (("q", search), ("project", project)) if v})
+    link_suffix = f"?{qs}" if qs else ""
+    back_url = (f"/task/{selected}{link_suffix}" if selected else f"/{link_suffix}")
     title = "工作台"
     if selected:
         view = tasks.read(actor=actor, task_id=selected)
@@ -438,25 +645,35 @@ def render_dashboard(tasks, actor, database: str, now: str, *, owner_html: str =
             slot = view["focus"][0] if view.get("focus") else None
             opened = [d for d in view["dependencies"] if d.get("status") == "open"]
             panel = owner_panel(dict(view["task"], open_dependencies=opened,
-                                     holder=_holder(opened, actor, names)), slot, tz)
-        right = _task_pane(view, actor, names, tz, now, panel)
+                                     holder=_holder(opened, actor, names),
+                                     responsibility=view.get("responsibility")), slot, tz)
+        watches = _watches_for(database, actor.workspace_id, selected)
+        right = _task_pane(view, actor, names, tz, now, panel, owner_csrf=owner_csrf, watches=watches, back=back_url)
     else:
         since = (datetime.fromisoformat(now[:-1]) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
         recent = [i for i in views.timeline(database, actor=actor, start=since, end=_plus_seconds(now, 1), limit=40)["items"]
                   if i["type"] == "task_event"]
+        load = schedule_load(database, actor=actor, now=now)
+        need_ids = ({s["task_id"] for s in load.get("suggestions", [])}
+                    | {r["task_id"] for r in ov["upcoming_followups"]}
+                    | {c["task_id"] for c in ov["commitments_open"] if c.get("task_id")}
+                    | {h["task_id"] for h in ov["my_human_actions"] if h.get("task_id")})
+        tmeta = _task_meta(database, actor.workspace_id, need_ids)
         right = _today_pane(ov, recent, stagnation(database, actor=actor, now=now),
-                            schedule_load(database, actor=actor, now=now), tz, names, owner_csrf=owner_csrf)
-    body = (f"<div class='mail{' has-sel' if selected else ''}'>{_rail(ov, actor, names, tz, now, selected, owner_html)}"
+                            load, tz, names, owner_csrf=owner_csrf, task_meta=tmeta, back=back_url)
+    body = (f"<div class='mail{' has-sel' if selected else ''}'>"
+            f"{_rail(ov, actor, names, tz, now, selected, owner_html, projects=projects, search=search, project=project, link_suffix=link_suffix)}"
             f"<section class=pane>{notice}{right}</section></div>")
     return _page(title, "work", body, now, tz, owner=bool(owner_html) or owner_panel is not None, wide=True)
 
 
 # ----------------------------------------------------------------------------------- Task
 def render_task(tasks, actor, database: str, task_id: str, now: str, *, owner_panel=None, notice: str = "",
-                owner_html: str = "", owner_csrf: str = "") -> str:
+                owner_html: str = "", owner_csrf: str = "", search: str = "", project: str | None = None) -> str:
     """The work page with this task open on the right."""
     return render_dashboard(tasks, actor, database, now, owner_html=owner_html, selected=task_id,
-                            owner_panel=owner_panel, notice=notice, owner_csrf=owner_csrf)
+                            owner_panel=owner_panel, notice=notice, owner_csrf=owner_csrf,
+                            search=search, project=project)
 
 
 # ------------------------------------------------------------------------------- Calendar
@@ -562,7 +779,8 @@ def _line_card(line: dict, tz, names) -> str:
 
 # ------------------------------------------------------------------------------- Projects
 def render_projects(tasks, actor, database: str, now: str, *, project: str | None = None,
-                    requester: str | None = None, owner: bool = False) -> str:
+                    requester: str | None = None, owner: bool = False,
+                    owner_csrf: str = "", notice: str = "") -> str:
     tz, names = _ctx(actor, database)
     pool = views.projects(database, actor=actor, project_id=project, requester_id=requester)["projects"]
 
@@ -579,11 +797,16 @@ def render_projects(tasks, actor, database: str, now: str, *, project: str | Non
         table = (f"<table><tr><th>任务</th><th>状态</th><th>执行人</th><th class=num>官方期限</th></tr>{rows}</table>"
                  if rows else '<p class="empty">没有任务</p>')
         blocked = f" · <span class=warn>阻塞 {p['blocked']}</span>" if p["blocked"] else ""
-        return (f"<section><h2>{e(p['title'])}</h2><div class=meta>进度 {done}/{total} · 最近官方期限 {due}{blocked}</div>"
-                f"<div class=bar><i style='width:{pct}%'></i></div><div class=meta>{counts}</div>{table}</section>")
+        goal = f"<div class=meta>目标：{e(p['goal'])}</div>" if p.get("goal") else ""
+        st_lbl = PROJECT_STATE_LABELS.get(p.get("state"), p.get("state", ""))
+        st_tag = f"<span class=tag>{e(st_lbl)}</span>" if p.get("id") and st_lbl else ""
+        edit = project_edit_form(owner_csrf, p, back="/projects") if (owner_csrf and p.get("id")) else ""
+        return (f"<section><h2>{st_tag}{e(p['title'])}</h2>{goal}<div class=meta>进度 {done}/{total} · 最近官方期限 {due}{blocked}</div>"
+                f"<div class=bar><i style='width:{pct}%'></i></div><div class=meta>{counts}</div>{table}{edit}</section>")
 
     form = _filters("/projects", actor, database, {"project": project, "requester": requester}, {})
-    body = form + (f"<div class=grid>{''.join(card(p) for p in pool)}</div>" if pool else '<p class="empty">没有项目</p>')
+    create = project_create_form(owner_csrf, back="/projects") if owner_csrf else ""
+    body = notice + create + form + (f"<div class=grid>{''.join(card(p) for p in pool)}</div>" if pool else '<p class="empty">没有项目</p>')
     return _page("项目池", "projects", body, now, tz, owner=owner)
 
 
