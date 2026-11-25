@@ -72,7 +72,12 @@ class ApprovalService:
         if not source_ref:
             raise EvidenceRequired("a decision needs the approver's own message as source_ref")
         with write_transaction(self._db) as conn:
-            if approver.source != "cli" and not conn.execute(
+            direct = approver.source == "cli" or (
+                approver.source == "owner" and conn.execute(
+                    "SELECT 1 FROM memberships WHERE workspace_id=? AND principal_id=? AND role='owner' AND active=1",
+                    (approver.workspace_id, approver.principal_id)).fetchone() is not None
+            )
+            if not direct and not conn.execute(
                     """SELECT 1 FROM inbox_messages i WHERE i.workspace_id=? AND i.sender_principal_id=?
                        AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r WHERE r.inbox_id=i.id
                             AND r.raw_source_ref=?))""",

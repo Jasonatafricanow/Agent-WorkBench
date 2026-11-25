@@ -25,7 +25,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -246,6 +246,35 @@ class SqliteTaskService:
                     (ws, task_id))],
             }
 
+    @staticmethod
+    def _owner_next(conn, ws: str, owner: str, now: str, limit: int,
+                    *, exclude: str | None = None) -> list[dict[str, Any]]:
+        """Rank actionable owner work before limiting, shared by the dashboard and Agent tools."""
+        zone = ZoneInfo(SqliteTaskService._workspace(conn, ws)["timezone"])
+        ts = now[:-1] + "+00:00" if now.endswith("Z") else now
+        local_now = datetime.fromisoformat(ts).astimezone(zone)
+        tomorrow = (local_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff = tomorrow.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return [dict(row) for row in conn.execute(
+            """WITH candidates AS (
+                 SELECT t.*, f.slot,
+                        CASE WHEN t.soft_due_at IS NULL THEN t.official_due_at
+                             WHEN t.official_due_at IS NULL THEN t.soft_due_at
+                             ELSE MIN(t.soft_due_at, t.official_due_at) END AS next_due_at
+                 FROM tasks t
+                 LEFT JOIN task_focus f ON f.workspace_id=t.workspace_id AND f.task_id=t.id
+                 LEFT JOIN task_responsibilities r ON r.workspace_id=t.workspace_id AND r.task_id=t.id
+                 WHERE t.workspace_id=? AND t.state IN ('INBOX','READY','DOING')
+                   AND COALESCE(CASE WHEN r.status='active' THEN r.current_executor_id END, t.assignee_id, ?)=?
+                   AND (f.slot IS NULL OR f.slot!='NOW') AND (? IS NULL OR t.id!=?)
+               ) SELECT * FROM candidates
+                 ORDER BY CASE WHEN next_due_at<=? THEN 0 WHEN next_due_at<? THEN 1 ELSE 2 END,
+                          priority, next_due_at IS NULL, next_due_at,
+                          CASE slot WHEN 'NEXT1' THEN 0 WHEN 'NEXT2' THEN 1 ELSE 2 END,
+                          created_at, id
+                 LIMIT ?""",
+            (ws, owner, owner, exclude, exclude, now, cutoff, limit))]
+
     def overview(self, *, actor: ActorContext, limit: int) -> dict[str, Any]:
         now = self._clock()
         with read_snapshot(self._database) as conn:
@@ -277,6 +306,7 @@ class SqliteTaskService:
             return {
                 "view": "full",
                 "now": now,
+                "next_for_owner": self._owner_next(conn, ws, owner_id, now, limit),
                 "focus": {slot: focus.get(slot) for slot in ("NOW", "NEXT1", "NEXT2")},
                 "inbox": tasks("state='INBOX'", order="created_at, id"),
                 "ready": tasks("state='READY'"),
@@ -1371,7 +1401,7 @@ class _Batch:
         # The response re-enters the work loop as a durable wake event in the same transaction. Answered
         # inside a live chat Run (a Host source), that Run already carries on: the event is recorded as
         # handled inline instead of starting a second Run that would repeat the same follow-up.
-        inline = self.actor.source != "cli"
+        inline = self.actor.source not in ("cli", "owner")
         wake_id = self.s._new_id("wake")
         self.c.execute(
             """INSERT INTO wake_events(id,workspace_id,task_id,origin,origin_event_id,kind,source_ref,status,

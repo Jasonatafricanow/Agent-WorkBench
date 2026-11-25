@@ -85,11 +85,11 @@ export function createWorkbenchTools(sessionManager) {
   };
   return [
     { name: 'list_tasks', label: '工作台总览',
-      description: 'WorkBench overview: NOW/NEXT focus, inbox, waiting (on whom), blocked, overdue, commitments, deliverables, my human requests. Requesters only see their own requests.',
+      description: 'WorkBench overview: next_for_owner (ranked pending work for the owner), NOW/NEXT focus, inbox, waiting (on whom), blocked, overdue, commitments, deliverables, my human requests. Requesters only see their own requests.',
       parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })) }),
       execute: async (_id, { limit }) => call('/v1/tools/list_tasks', { limit: limit || 50 }) },
     { name: 'get_task', label: '读取任务',
-      description: 'Read one task with its version, events, dependencies, reminders, commitments, deliverables, responsibility and latest checkpoint. Read before every change: writes need expected_version.',
+      description: 'Read one task with its version, done_summary (shared progress notes), next_action, events, dependencies, reminders, commitments, deliverables, responsibility and latest checkpoint. Read before every change: writes need expected_version.',
       parameters: Type.Object({ task_id: Type.String({ minLength: 1 }) }),
       execute: async (_id, { task_id }) => call('/v1/tools/get_task', { task_id }) },
     { name: 'change_tasks', label: '更新工作台',

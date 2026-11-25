@@ -63,6 +63,11 @@ FORM_CSS = """
 .owner input,.owner select,.owner textarea,.owner button{font:inherit;font-size:14px;padding:6px 8px;min-height:36px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px}
 .owner input[type=text],.owner textarea{flex:1 1 220px;min-width:0}.owner button{cursor:pointer}.owner button.primary{background:var(--accent);color:var(--pb-accent-ink);border-color:var(--accent)}
 .owner button.danger{color:var(--warn);border-color:var(--warn)}.owner .row{display:flex;flex-wrap:wrap;gap:6px}
+form.inline-act{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0 0}
+form.inline-act input{font:inherit;font-size:13px;padding:3px 8px;min-height:28px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:5px;flex:1 1 160px;min-width:0}
+form.inline-act button{font:inherit;font-size:12px;padding:3px 10px;min-height:28px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:5px;cursor:pointer}
+form.inline-act button.primary{background:var(--accent);color:var(--pb-accent-ink);border-color:var(--accent)}
+form.inline-act button.danger{color:var(--warn);border-color:var(--warn)}
 .notice{padding:8px 12px;border-radius:8px;margin-bottom:12px;border:1px solid var(--line)}.notice.bad{color:var(--warn);border-color:var(--warn)}.notice.good{color:var(--ok);border-color:var(--ok)}
 """
 
@@ -82,20 +87,51 @@ def _who_input(people, recent, placeholder: str) -> str:
             f"<datalist id=wb-holders>{options}</datalist>")
 
 
-def quick_add_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = (), recent: list[str] = ()) -> str:
+def _project_select(projects: list[tuple[str, str]], selected: str | None = None, empty: str = "不归入项目") -> str:
+    options = "".join(
+        f"<option value='{e(pid)}'{' selected' if selected == pid else ''}>{e(title)}</option>"
+        for pid, title in projects)
+    return f"<select name=project_id aria-label='所属项目'><option value=''>{empty}</option>{options}</select>"
+
+
+def today_focus_button(csrf: str, task_id: str, back: str = "/") -> str:
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='focus', slot='NOW', task_id=task_id)}"
+            "<button>设为 NOW</button></form>")
+
+
+def approval_buttons(csrf: str, approval_id: str, back: str = "/") -> str:
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='approval', approval_id=approval_id)}"
+            "<button class=primary name=approve value=1>批准</button>"
+            "<button class=danger name=approve value=0>拒绝</button></form>")
+
+
+def human_action_form(csrf: str, request_id: str, back: str = "/") -> str:
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='human_reply', human_action_id=request_id)}"
+            "<input type=text name=reply placeholder='答复说明（可选）' maxlength=400>"
+            "<button class=primary name=status value=completed>确认处理</button>"
+            "<button class=danger name=status value=declined>拒绝</button></form>")
+
+
+def quick_add_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = (), recent: list[str] = (),
+                   projects: list[tuple[str, str]] = ()) -> str:
     """The work page's one-line add: a title and who does it; the rest folds away. Handing it to someone works like
     sending a mail: the task stays on the owner's board in WAITING until that person answers."""
     assign = _who_input(people, recent, "交给谁（可空）")
     priorities = "".join(f"<option value={p}{' selected' if p == 2 else ''}>优先级 {p}</option>" for p in range(5))
     ask = "<input type=text name=ask placeholder='交给别人时：要对方做什么' maxlength=400>"
+    proj = _project_select(projects) if projects else ""
     return (
         f"<div class=quick><form method=post action=/owner/ops>{_hidden(csrf, back, action='create')}"
         "<input type=text name=title placeholder='新建或指派：要做什么' required maxlength=200 aria-label='要做什么'>"
         f"{assign}<button class=primary>记下</button>"
-        "<details><summary>更多：下一步、期望完成、状态、焦点</summary><div class=more>"
+        "<details><summary>更多：下一步、截止、项目、状态、焦点</summary><div class=more>"
         f"{ask}<input type=text name=next_action placeholder='下一步（可空）' maxlength=400>"
         "<label>期望完成<input type=datetime-local name=soft_due></label>"
-        f"<select name=priority>{priorities}</select>"
+        "<label>官方截止<input type=date name=official_due></label>"
+        f"{proj}<select name=priority>{priorities}</select>"
         "<select name=state><option value=INBOX>先放收件箱</option><option value=READY>可做</option><option value=DOING>马上做</option></select>"
         "<select name=focus><option value=''>不设焦点</option><option value=NOW>设为 NOW</option>"
         "<option value=NEXT1>设为 NEXT1</option><option value=NEXT2>设为 NEXT2</option></select>"
@@ -138,14 +174,18 @@ def task_panel(csrf: str, task: dict, focus_slot: str | None, tz: ZoneInfo) -> s
     priorities = "".join(f"<option value={p}{' selected' if p == task.get('priority') else ''}>优先级 {p}</option>"
                          for p in range(5))
     delay = "".join(f"<option value={k}>{DELAY_LABELS[k]}</option>" for k in sorted(DELAY_KINDS))
-    edit = "<details class=edit><summary>修改标题、下一步、期望完成、优先级</summary>" + _post(csrf, back,
+    official_val = (task.get("official_due_local") or _utc_to_input(task.get("official_due_at"), tz))[:10]
+    proj_select = _project_select(task.get("projects", ()), task.get("project_id"), "未归入项目") if task.get("projects") else ""
+    extra_edit = {"has_project": "1"} if task.get("projects") else {}
+    edit = "<details class=edit><summary>修改标题、下一步、截止、项目、优先级</summary>" + _post(csrf, back,
                  f"<input type=text name=title value='{e(task['title'])}' required maxlength=200>"
                  f"<input type=text name=next_action value='{e(task.get('next_action'))}' placeholder='下一步' maxlength=400>"
                  f"<label class=meta>期望完成 <input type=datetime-local name=soft_due value='{_utc_to_input(task.get('soft_due_at'), tz)}'></label>"
-                 f"<select name=priority>{priorities}</select>"
+                 f"<label class=meta>官方截止 <input type=date name=official_due value='{e(official_val)}'></label>"
+                 f"{proj_select}<select name=priority>{priorities}</select>"
                  f"<select name=delay_kind><option value=''>（往后推时选原因）</option>{delay}</select>"
                  "<input type=text name=reason placeholder='往后推的原因' maxlength=400>"
-                 "<button>保存修改</button>", action="edit", **common) + "</details>"
+                 "<button>保存修改</button>", action="edit", prev_official_due=official_val, **extra_edit, **common) + "</details>"
     progress = _post(csrf, back, "<input type=text name=text placeholder='记一笔进展（对方的回复也记在这）' required maxlength=1000>"
                                  "<button>记下</button>", action="progress", **common)
     open_deps = ",".join(d["id"] for d in task.get("open_dependencies", []))
@@ -219,10 +259,16 @@ def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None) -
               "priority": int(form.get("priority") or 2), **base, "reason": "主人在网页工作台新建"}
         if form.get("next_action"):
             op["next_action"] = form["next_action"]
+        if form.get("project_id"):
+            op["project_id"] = form["project_id"]
         due = _local_input_to_utc(form.get("soft_due", ""), tz)
         if due:
             op["soft_due_at"] = due
         ops = [op]
+        official = (form.get("official_due") or "").strip()
+        if official:
+            ops.append({"op": "set_official_due", "task_id": "$new", "local": official, **base,
+                        "reason": "主人在网页工作台设置官方截止"})
         holder = _holder_of(form, people)
         if holder:
             op["state"] = "READY"
@@ -264,14 +310,35 @@ def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None) -
     if action == "unfocus":
         return [{"op": "set_focus", "slot": form.get("slot"), "task_id": None, **base, "reason": "主人取消焦点"}], "已取消焦点"
     if action == "edit":
+        tid = form.get("task_id")
         fields = {"title": form.get("title", ""), "next_action": form.get("next_action") or None,
                   "priority": int(form.get("priority") or 2),
                   "soft_due_at": _local_input_to_utc(form.get("soft_due", ""), tz)}
-        op = {"op": "patch_task", "task_id": form.get("task_id"), "expected_version": version, "fields": fields, **base,
+        if form.get("has_project") == "1" or "project_id" in form:
+            fields["project_id"] = form.get("project_id") or None
+        prev_official = (form.get("prev_official_due") or "").strip()
+        new_official = (form.get("official_due") or "").strip()
+        if prev_official and not new_official:
+            fields["official_due_at"] = None
+        op = {"op": "patch_task", "task_id": tid, "expected_version": version, "fields": fields, **base,
               "reason": reason or "主人在网页工作台修改"}
         if form.get("delay_kind"):
             op["delay_kind"] = form["delay_kind"]
-        return [op], "已保存"
+        ops = [op]
+        if new_official and new_official != prev_official:
+            off_op = {"op": "set_official_due", "task_id": tid, "local": new_official, **base,
+                      "reason": reason or "主人在网页工作台修改官方截止"}
+            if form.get("delay_kind"):
+                off_op["delay_kind"] = form["delay_kind"]
+            ops.append(off_op)
+        return ops, "已保存"
+    if action == "human_reply":
+        reply = (form.get("reply") or "").strip()
+        status = form.get("status") or "completed"
+        op = {"op": "respond_human_action", "human_action_id": form.get("human_action_id"), "status": status,
+              "response": {"text": reply} if reply else {}, **base,
+              "reason": reply or ("主人确认处理" if status == "completed" else "主人拒绝")}
+        return [op], ("已确认处理" if status == "completed" else "已拒绝请求")
     if action == "progress":
         return [{"op": "append_progress", "task_id": form.get("task_id"), "expected_version": version,
                  "text": form.get("text", ""), **base, "reason": "主人记进展"}], "已记下"

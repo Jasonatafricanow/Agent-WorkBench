@@ -12,6 +12,7 @@
    - 官方截止日：用 `set_official_due`（只说了日期就只写日期）。返回里有 `suggested_soft_due` 时，把建议和依据告诉主人，他同意了再 `patch_task` 写进 soft due。
    - 证据不够、不能直接改的（例如别人转述"截止日可能要推"）：用 `propose_change` 交给主人决定，不要直接改。
    - 一件事要分给另一个 Agent 接着做：当前执行的 Agent 用 `handoff`，写清下一步和没核实的事项。
+   - 主人问“接下来有什么要做”时读 list_tasks 的 next_for_owner，保持返回的次序。接着办一件事时先读 get_task 的 done_summary、next_action 和最新工作书签。主人说“还没做完，记一下”就用 append_progress 保存原意，任务继续开放；只有明确在等外部结果才建依赖。
    - "做了什么"用 `append_progress`，"下一步"写 `next_action`。
    - 答应别人的、别人答应的 → `record_commitment`；初稿/文件 → `register_deliverable`，发出去要有回执才算 SUBMITTED，对方明确认可才算 ACCEPTED。
 3. 收尾：用 `work_memory_write` 写一条交接便条，只记这次**有人明确说了的、确实发生了的**：谁说的、说了什么、定了什么、做了什么，带来源。
