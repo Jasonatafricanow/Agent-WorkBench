@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 from datetime import datetime, timezone
 from html import escape
@@ -22,8 +23,10 @@ from .task_service import DELAY_KINDS, TRANSITIONS
 
 STATE_LABELS = {"INBOX": "收件箱", "READY": "可做", "DOING": "进行中", "WAITING": "等待", "BLOCKED": "阻塞",
                 "DONE": "完成", "CANCELLED": "取消"}
+PROJECT_STATE_LABELS = {"active": "进行中", "paused": "暂停", "done": "完成", "cancelled": "取消"}
 DELAY_LABELS = {"external_wait": "等外部", "reprioritized": "调整优先级", "underestimated": "低估了工作量",
                 "blocked": "被阻塞", "unavailable": "没空", "scope_changed": "范围变了", "other": "其他"}
+REMINDER_KIND_LABELS = {"followup": "跟进催促", "official_due": "官方截止前", "soft_due": "内部节点前", "checkin": "进展确认"}
 
 
 def e(value) -> str:
@@ -65,9 +68,11 @@ FORM_CSS = """
 .owner button.danger{color:var(--warn);border-color:var(--warn)}.owner .row{display:flex;flex-wrap:wrap;gap:6px}
 form.inline-act{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0 0}
 form.inline-act input{font:inherit;font-size:13px;padding:3px 8px;min-height:28px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:5px;flex:1 1 160px;min-width:0}
+form.inline-act select{font:inherit;font-size:12px;padding:3px 6px;min-height:28px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:5px}
 form.inline-act button{font:inherit;font-size:12px;padding:3px 10px;min-height:28px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:5px;cursor:pointer}
 form.inline-act button.primary{background:var(--accent);color:var(--pb-accent-ink);border-color:var(--accent)}
 form.inline-act button.danger{color:var(--warn);border-color:var(--warn)}
+.owner details.edit{margin-top:8px}
 .notice{padding:8px 12px;border-radius:8px;margin-bottom:12px;border:1px solid var(--line)}.notice.bad{color:var(--warn);border-color:var(--warn)}.notice.good{color:var(--ok);border-color:var(--ok)}
 """
 
@@ -94,6 +99,10 @@ def _project_select(projects: list[tuple[str, str]], selected: str | None = None
     return f"<select name=project_id aria-label='所属项目'><option value=''>{empty}</option>{options}</select>"
 
 
+def _delay_options() -> str:
+    return "".join(f"<option value={k}>{DELAY_LABELS[k]}</option>" for k in sorted(DELAY_KINDS))
+
+
 def today_focus_button(csrf: str, task_id: str, back: str = "/") -> str:
     return (f"<form method=post action=/owner/ops class=inline-act>"
             f"{_hidden(csrf, back, action='focus', slot='NOW', task_id=task_id)}"
@@ -107,12 +116,81 @@ def approval_buttons(csrf: str, approval_id: str, back: str = "/") -> str:
             "<button class=danger name=approve value=0>拒绝</button></form>")
 
 
-def human_action_form(csrf: str, request_id: str, back: str = "/") -> str:
+def adopt_soft_due_button(csrf: str, task_id: str, version: int, soft_due_local: str,
+                          target_date: str, back: str = "/") -> str:
     return (f"<form method=post action=/owner/ops class=inline-act>"
-            f"{_hidden(csrf, back, action='human_reply', human_action_id=request_id)}"
-            "<input type=text name=reply placeholder='答复说明（可选）' maxlength=400>"
-            "<button class=primary name=status value=completed>确认处理</button>"
-            "<button class=danger name=status value=declined>拒绝</button></form>")
+            f"{_hidden(csrf, back, action='adopt_soft_due', task_id=task_id, version=version, soft_due=soft_due_local, target_date=target_date)}"
+            f"<button class=primary>采纳：改为 {e(target_date)}</button></form>")
+
+
+def human_action_form(csrf: str, request_id: str, back: str = "/", *, can_apply: bool = False,
+                      task_version: int | None = None, needs_delay_kind: bool = False) -> str:
+    base_form = (f"<form method=post action=/owner/ops class=inline-act>"
+                 f"{_hidden(csrf, back, action='human_reply', human_action_id=request_id)}"
+                 "<input type=text name=reply placeholder='答复说明（可选）' maxlength=400>"
+                 "<button class=primary name=status value=completed>确认处理</button>"
+                 "<button class=danger name=status value=declined>拒绝</button></form>")
+    if not can_apply:
+        return base_form
+    ver_field = {"version": task_version} if task_version is not None else {}
+    delay = f"<select name=delay_kind aria-label='延期原因'>{_delay_options()}</select>" if needs_delay_kind else ""
+    apply_form = (f"<form method=post action=/owner/ops class=inline-act>"
+                  f"{_hidden(csrf, back, action='human_apply', human_action_id=request_id, **ver_field)}"
+                  f"{delay}<button class=primary>同意并应用修改</button></form>")
+    return apply_form + base_form
+
+
+def commitment_buttons(csrf: str, commitment_id: str, task_id: str, version: int, back: str = "/") -> str:
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='commitment_status', commitment_id=commitment_id, task_id=task_id, version=version)}"
+            "<button class=primary name=status value=kept>已履约</button>"
+            "<button class=danger name=status value=broken>未履约</button>"
+            "<button name=status value=withdrawn>撤回</button></form>")
+
+
+def cancel_reminder_button(csrf: str, reminder_id: str, task_id: str, version: int, back: str = "/") -> str:
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='cancel_reminder', reminder_id=reminder_id, task_id=task_id, version=version)}"
+            "<button>取消提醒</button></form>")
+
+
+def resolve_dep_button(csrf: str, dependency_id: str, task_id: str, version: int,
+                       *, auto_ready: bool = False, back: str = "/") -> str:
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='resolve_dep', dependency_id=dependency_id, task_id=task_id, version=version, auto_ready=('1' if auto_ready else '0'))}"
+            "<input type=text name=reason placeholder='解决说明（可选）' maxlength=400>"
+            "<button class=primary>已解决</button></form>")
+
+
+def reconcile_unknown_form(csrf: str, item: dict, back: str = "/") -> str:
+    if item.get("kind") == "delivery":
+        return (f"<form method=post action=/owner/ops class=inline-act>"
+                f"{_hidden(csrf, back, action='reconcile_delivery', delivery_id=item['id'])}"
+                "<input type=text name=receipt placeholder='回执编号（确认已发时必填）' maxlength=120>"
+                "<button class=primary name=status value=sent>核实已发出</button>"
+                "<button class=danger name=status value=failed>标记未发失败</button></form>")
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='reconcile_wake', event_id=item['id'])}"
+            "<button class=primary name=status value=completed>核实已完成</button>"
+            "<button class=danger name=status value=failed>核实失败</button></form>")
+
+
+def project_create_form(csrf: str, back: str = "/projects") -> str:
+    return (f"<section class=owner style='margin-bottom:12px'><h2>新建项目</h2>"
+            f"{_post(csrf, back, '<input type=text name=title placeholder=项目名称 required maxlength=200><input type=text name=goal placeholder=项目目标（可选） maxlength=400><button class=primary>新建项目</button>', action='create_project')}"
+            "</section>")
+
+
+def project_edit_form(csrf: str, project: dict, back: str = "/projects") -> str:
+    opts = "".join(
+        f"<option value={k}{' selected' if project.get('state') == k else ''}>{label}</option>"
+        for k, label in PROJECT_STATE_LABELS.items())
+    inner = (f"<input type=text name=title value='{e(project['title'])}' required maxlength=200>"
+             f"<input type=text name=goal value='{e(project.get('goal'))}' placeholder='项目目标' maxlength=400>"
+             f"<select name=state aria-label='项目状态'>{opts}</select>"
+             "<button>保存项目</button>")
+    return (f"<div class=owner><details class=edit><summary>编辑项目 / 改状态</summary>"
+            f"{_post(csrf, back, inner, action='update_project', project_id=project['id'])}</details></div>")
 
 
 def quick_add_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = (), recent: list[str] = (),
@@ -129,6 +207,7 @@ def quick_add_form(csrf: str, back: str = "/", people: list[tuple[str, str]] = (
         f"{assign}<button class=primary>记下</button>"
         "<details><summary>更多：下一步、截止、项目、状态、焦点</summary><div class=more>"
         f"{ask}<input type=text name=next_action placeholder='下一步（可空）' maxlength=400>"
+        "<label>计划开始<input type=datetime-local name=planned_start></label>"
         "<label>期望完成<input type=datetime-local name=soft_due></label>"
         "<label>官方截止<input type=date name=official_due></label>"
         f"{proj}<select name=priority>{priorities}</select>"
@@ -173,13 +252,14 @@ def task_panel(csrf: str, task: dict, focus_slot: str | None, tz: ZoneInfo) -> s
         return (f"<section class=owner><h2>我来处理</h2>{reasoned}</section>")
     priorities = "".join(f"<option value={p}{' selected' if p == task.get('priority') else ''}>优先级 {p}</option>"
                          for p in range(5))
-    delay = "".join(f"<option value={k}>{DELAY_LABELS[k]}</option>" for k in sorted(DELAY_KINDS))
+    delay = _delay_options()
     official_val = (task.get("official_due_local") or _utc_to_input(task.get("official_due_at"), tz))[:10]
     proj_select = _project_select(task.get("projects", ()), task.get("project_id"), "未归入项目") if task.get("projects") else ""
     extra_edit = {"has_project": "1"} if task.get("projects") else {}
-    edit = "<details class=edit><summary>修改标题、下一步、截止、项目、优先级</summary>" + _post(csrf, back,
+    edit = "<details class=edit><summary>修改标题、下一步、计划、截止、项目、优先级</summary>" + _post(csrf, back,
                  f"<input type=text name=title value='{e(task['title'])}' required maxlength=200>"
                  f"<input type=text name=next_action value='{e(task.get('next_action'))}' placeholder='下一步' maxlength=400>"
+                 f"<label class=meta>计划开始 <input type=datetime-local name=planned_start value='{_utc_to_input(task.get('planned_start_at'), tz)}'></label>"
                  f"<label class=meta>期望完成 <input type=datetime-local name=soft_due value='{_utc_to_input(task.get('soft_due_at'), tz)}'></label>"
                  f"<label class=meta>官方截止 <input type=date name=official_due value='{e(official_val)}'></label>"
                  f"{proj_select}<select name=priority>{priorities}</select>"
@@ -198,8 +278,61 @@ def task_panel(csrf: str, task: dict, focus_slot: str | None, tz: ZoneInfo) -> s
     take = (_post(csrf, back, f"<button>收回自己做</button>", action="takeback", cancel=open_deps, **common)
             if state == "WAITING" and open_deps else "")
     who = (f"<div class=meta>现在在 {e(holder)} 手上</div>" if holder else "<div class=meta>交给别人（任何名字都行，不必是成员）</div>")
+
+    team = task.get("team") or []
+    owner_id = task.get("owner_id") or ""
+    recips = "".join(
+        f"<option value='{e(pid)}'{' selected' if pid == owner_id else ''}>{e(name)}</option>"
+        for pid, name in team)
+    rem_kinds = "".join(f"<option value={k}>{lbl}</option>" for k, lbl in REMINDER_KIND_LABELS.items())
+    rem_form = "<details class=edit><summary>设提醒 / 定期追问</summary>" + _post(
+        csrf, back,
+        f"<label class=meta>提醒时间 <input type=datetime-local name=local_at required></label>"
+        f"<select name=kind aria-label='提醒类型'>{rem_kinds}</select>"
+        f"{f'<select name=recipient_id aria-label=提醒谁>{recips}</select>' if recips else ''}"
+        "<input type=number name=repeat_every_days min=1 max=90 placeholder='每隔几天重复（可空）'>"
+        "<input type=number name=max_repeats min=1 max=20 placeholder='最多次数（可空）'>"
+        "<button>设提醒</button>",
+        action="set_reminder", **common) + "</details>"
+
+    all_people = task.get("all_members") or task.get("people", ())
+    other_opts = "".join(
+        f"<option value='{e(pid)}'>{e(name)}</option>"
+        for pid, name in all_people if pid != owner_id)
+    dir_opts = "<option value=owner_owes>我欠对方</option>" + ("<option value=owed_to_owner>对方欠我</option>" if other_opts else "")
+    other_select = f"<select name=other_id aria-label='对方'><option value=''>对方（可空）</option>{other_opts}</select>" if other_opts else ""
+    com_form = "<details class=edit><summary>记一笔承诺</summary>" + _post(
+        csrf, back,
+        f"<select name=direction aria-label='承诺方向'>{dir_opts}</select>{other_select}"
+        "<input type=text name=promise_text placeholder='答应了什么事' required maxlength=400>"
+        "<label class=meta>截止 <input type=date name=due_local></label>"
+        "<button>记下承诺</button>",
+        action="record_commitment", owner_id=owner_id, **common) + "</details>"
+
+    dlv_form = "<details class=edit><summary>登记交付物</summary>" + _post(
+        csrf, back,
+        "<input type=text name=title placeholder='交付物名称' required maxlength=200>"
+        "<input type=text name=artifact_ref placeholder='文件/链接/编号' required maxlength=400>"
+        "<button>登记</button>",
+        action="register_deliverable", **common) + "</details>"
+
+    resp = task.get("responsibility")
+    resp_controls = ""
+    if resp and resp.get("status") in ("active", "paused"):
+        if resp["status"] == "active":
+            resp_controls = _post(csrf, back, "<input type=text name=reason placeholder='暂停或撤回原因（可选）' maxlength=400>"
+                                              "<button name=status value=paused>暂停委托</button>"
+                                              "<button class=danger name=status value=revoked>撤回委托</button>",
+                                  action="responsibility_status", **common)
+        else:
+            resp_controls = _post(csrf, back, "<input type=text name=reason placeholder='恢复或撤回原因（可选）' maxlength=400>"
+                                              "<button class=primary name=status value=active>恢复委托</button>"
+                                              "<button class=danger name=status value=revoked>撤回委托</button>",
+                                  action="responsibility_status", **common)
+        resp_controls = f"<div class=meta>委托控制</div>{resp_controls}"
+
     return (f"<section class=owner><h2>处理</h2>{progress}{who}{hand}<div class=row>{take}{buttons}</div>{reasoned}"
-            f"<div class=meta>焦点</div><div class=row>{focus}</div>{edit}</section>")
+            f"<div class=meta>焦点</div><div class=row>{focus}</div>{resp_controls}{edit}{rem_form}{com_form}{dlv_form}</section>")
 
 
 def _holder_of(form: dict, people: dict[str, str] | None) -> tuple[str | None, str] | None:
@@ -247,7 +380,8 @@ def notice(query: dict) -> str:
     return ""
 
 
-def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None) -> tuple[list[dict], str]:
+def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None,
+               *, owner_id: str | None = None) -> tuple[list[dict], str]:
     """A submitted form -> (TaskService operations, message on success). `people`: assignable id -> name."""
     action = form.get("action")
     ref = f"owner-web:{form.get('nonce', '')}"
@@ -261,6 +395,9 @@ def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None) -
             op["next_action"] = form["next_action"]
         if form.get("project_id"):
             op["project_id"] = form["project_id"]
+        planned = _local_input_to_utc(form.get("planned_start", ""), tz)
+        if planned:
+            op["planned_start_at"] = planned
         due = _local_input_to_utc(form.get("soft_due", ""), tz)
         if due:
             op["soft_due_at"] = due
@@ -313,6 +450,7 @@ def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None) -
         tid = form.get("task_id")
         fields = {"title": form.get("title", ""), "next_action": form.get("next_action") or None,
                   "priority": int(form.get("priority") or 2),
+                  "planned_start_at": _local_input_to_utc(form.get("planned_start", ""), tz),
                   "soft_due_at": _local_input_to_utc(form.get("soft_due", ""), tz)}
         if form.get("has_project") == "1" or "project_id" in form:
             fields["project_id"] = form.get("project_id") or None
@@ -332,6 +470,82 @@ def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None) -
                 off_op["delay_kind"] = form["delay_kind"]
             ops.append(off_op)
         return ops, "已保存"
+    if action == "adopt_soft_due":
+        tid = form.get("task_id")
+        utc = _local_input_to_utc(form.get("soft_due", ""), tz)
+        if not utc:
+            raise InvalidOperation("缺少目标期望时间", field="soft_due")
+        target_date = (form.get("target_date") or form.get("soft_due", "")[:10]).strip()
+        return [{"op": "patch_task", "task_id": tid, "expected_version": version,
+                 "fields": {"soft_due_at": utc}, **base,
+                 "reason": f"采纳排期建议：期望完成提前到 {target_date}"}], f"已将期望完成改到 {target_date}"
+    if action == "create_project":
+        op = {"op": "create_project", "title": form.get("title", ""), **base, "reason": "主人在网页工作台新建项目"}
+        if form.get("goal"):
+            op["goal"] = form["goal"]
+        return [op], "已新建项目"
+    if action == "update_project":
+        return [{"op": "update_project", "project_id": form.get("project_id"), "title": form.get("title", ""),
+                 "goal": form.get("goal", ""), "state": form.get("state", "active"), **base,
+                 "reason": "主人在网页工作台更新项目"}], "已更新项目"
+    if action == "resolve_dep":
+        tid = form.get("task_id")
+        why = reason or "主人在网页工作台确认等待已解决"
+        ops = [{"op": "resolve_dependency", "task_id": tid, "expected_version": version,
+                "dependency_id": form.get("dependency_id"), "resolution": "resolved", **base, "reason": why}]
+        if form.get("auto_ready") == "1":
+            ops.append({"op": "transition", "task_id": tid, "to": "READY", **base, "reason": why})
+        return ops, "等待已解决"
+    if action == "set_reminder":
+        local_at = (form.get("local_at") or "").strip()
+        if not local_at:
+            raise InvalidOperation("请选择提醒时间", field="local_at")
+        op = {"op": "set_reminder", "task_id": form.get("task_id"), "expected_version": version,
+              "local_at": local_at, "kind": form.get("kind") or "followup", **base,
+              "reason": "主人在网页工作台设提醒"}
+        if form.get("recipient_id"):
+            op["recipient_principal_id"] = form["recipient_id"]
+        every, repeats = (form.get("repeat_every_days") or "").strip(), (form.get("max_repeats") or "").strip()
+        if every or repeats:
+            if not (every.isdigit() and (not repeats or repeats.isdigit())):
+                raise InvalidOperation("重复天数和次数必须是正整数", field="repeat_every_days")
+            op["repeat_every_days"] = int(every)
+            op["max_repeats"] = int(repeats or "3")
+        return [op], "已设置提醒"
+    if action == "cancel_reminder":
+        return [{"op": "cancel_reminder", "task_id": form.get("task_id"), "expected_version": version,
+                 "reminder_id": form.get("reminder_id"), **base, "reason": "主人在网页工作台取消提醒"}], "已取消提醒"
+    if action == "record_commitment":
+        owner_pid = (form.get("owner_id") or owner_id or "").strip()
+        direction = form.get("direction") or "owner_owes"
+        other_id = (form.get("other_id") or "").strip() or None
+        if direction == "owed_to_owner":
+            if not other_id:
+                raise InvalidOperation("别人欠我时要选对方是谁", field="other_id")
+            promisor_id, promisee_id = other_id, owner_pid
+        else:
+            promisor_id, promisee_id = owner_pid, other_id
+        op = {"op": "record_commitment", "task_id": form.get("task_id"), "expected_version": version,
+              "promisor_id": promisor_id, "promisee_id": promisee_id,
+              "promise_text": form.get("promise_text", ""), **base, "reason": "主人在网页工作台记承诺"}
+        if (form.get("due_local") or "").strip():
+            op["due_local"] = form["due_local"].strip()
+        return [op], "已记下承诺"
+    if action == "commitment_status":
+        status = form.get("status", "")
+        return [{"op": "update_commitment", "task_id": form.get("task_id"), "expected_version": version,
+                 "commitment_id": form.get("commitment_id"), "status": status, **base,
+                 "reason": f"主人在网页工作台更新承诺状态：{status}"}], "已更新承诺"
+    if action == "register_deliverable":
+        return [{"op": "register_deliverable", "task_id": form.get("task_id"), "expected_version": version,
+                 "title": form.get("title", ""), "artifact_ref": form.get("artifact_ref", ""), **base,
+                 "reason": "主人在网页工作台登记交付物"}], "已登记交付物"
+    if action == "responsibility_status":
+        status = form.get("status", "")
+        why = reason or {"paused": "主人在网页工作台暂停委托", "active": "主人在网页工作台恢复委托",
+                         "revoked": "主人在网页工作台撤回委托"}.get(status, "主人在网页工作台更新委托")
+        return [{"op": "set_responsibility_status", "task_id": form.get("task_id"), "expected_version": version,
+                 "status": status, **base, "reason": why}], "已更新委托状态"
     if action == "human_reply":
         reply = (form.get("reply") or "").strip()
         status = form.get("status") or "completed"
@@ -343,3 +557,51 @@ def operations(form: dict, tz: ZoneInfo, people: dict[str, str] | None = None) -
         return [{"op": "append_progress", "task_id": form.get("task_id"), "expected_version": version,
                  "text": form.get("text", ""), **base, "reason": "主人记进展"}], "已记下"
     raise InvalidOperation("unknown action", field="action")
+
+
+def apply_human_request_ops(req_row, task_row, form: dict) -> tuple[list[dict], str]:
+    """Build atomic operations to respond to a decision/import human request and apply its proposed changes."""
+    if not req_row["task_id"] or task_row is None:
+        raise InvalidOperation("这条待办没有关联任务，请直接点确认处理", field="human_action_id")
+    payload = json.loads(req_row["request_json"] or "{}")
+    kind = payload.get("kind")
+    ref = f"owner-web:{form.get('nonce', '')}"
+    base = {"evidence_type": "explicit_user", "source_ref": ref}
+    reason = (form.get("reason") or payload.get("reason") or "主人确认应用建议修改").strip()
+    delay_kind = (form.get("delay_kind") or "external_wait").strip()
+    expected_version = int(form["version"]) if (form.get("version") or "").isdigit() else task_row["version"]
+    tid = task_row["id"]
+    mutate_ops: list[dict] = []
+    if kind == "import_due_changed":
+        imported = payload.get("imported")
+        if not imported:
+            raise InvalidOperation("导入变更缺少新日期", field="human_action_id")
+        op = {"op": "set_official_due", "task_id": tid, "expected_version": expected_version,
+              "local": imported, **base, "reason": reason}
+        if task_row["official_due_at"]:
+            op["delay_kind"] = delay_kind
+        mutate_ops.append(op)
+        message = "已确认并更新官方截止"
+    elif kind == "proposed_change":
+        fields = dict(payload.get("fields") or {})
+        official_local = fields.pop("official_due_local", None)
+        if official_local:
+            op = {"op": "set_official_due", "task_id": tid, "expected_version": expected_version,
+                  "local": official_local, **base, "reason": reason}
+            if task_row["official_due_at"]:
+                op["delay_kind"] = delay_kind
+            mutate_ops.append(op)
+        if fields:
+            patch_op = {"op": "patch_task", "task_id": tid, "expected_version": expected_version,
+                        "fields": fields, **base, "reason": reason}
+            if any(k in fields for k in ("soft_due_at", "official_due_at")):
+                patch_op["delay_kind"] = delay_kind
+            mutate_ops.append(patch_op)
+        if not mutate_ops:
+            raise InvalidOperation("这条提议没有可应用的修改字段", field="human_action_id")
+        message = "已确认并应用修改"
+    else:
+        raise InvalidOperation("这种待办不支持直接应用修改", field="human_action_id")
+    respond_op = {"op": "respond_human_action", "human_action_id": req_row["id"], "status": "completed",
+                  "response": {"applied": True}, **base, "reason": reason}
+    return [*mutate_ops, respond_op], message
