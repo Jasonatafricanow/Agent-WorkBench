@@ -311,6 +311,19 @@ def _today_pane(ov, recent, stuck, load, tz, names) -> str:
         focus_html = f"<div class=slots>{slots}</div>"
     else:
         focus_html = "<p class=quiet>还没有放进 NOW 的事。从左边点开一件，在下面设为 NOW。</p>"
+
+    def next_item(t):
+        pri = ("最高", "高", "普通", "低", "最低")[t["priority"]]
+        due = (t.get("official_due_local") or _local(t.get("official_due_at"), tz, "%m-%d %H:%M")
+               or _local(t.get("soft_due_at"), tz, "%m-%d %H:%M"))
+        bits = [f"优先级：{pri}", *([f"截止 {e(due)}"] if due else [])]
+        last_note = (t.get("done_summary") or "").strip().splitlines()
+        resume = f"<div class=meta>上次记下：{e(last_note[-1])}</div>" if last_note else ""
+        return f"<a href='/task/{e(t['id'])}'>{e(t['title'])}</a><div class=meta>{' · '.join(bits)}</div>{resume}"
+
+    next_items = ov.get("next_for_owner") or []
+    next_html = (f"<h3 class=sub-h>接下来（按紧迫度排序）</h3>{_list(next_items[:8], next_item)}"
+                 if next_items else "")
     attention = [
         ("待审批", ov["my_approvals"], lambda a: f"{e(a['request_summary'])}<div class=meta>/approve {e(a['id'])}"
                                               f"{' · 到期 ' + _local(a['expires_at'], tz) if a['expires_at'] else ''}</div>"),
@@ -338,7 +351,7 @@ def _today_pane(ov, recent, stuck, load, tz, names) -> str:
         f"<a href='/task/{e(ev['task_id'])}'>{e(ev['title'])}</a> · {KIND_LABELS.get(ev['kind'], e(ev['kind']))}"
         f"<div class=meta>{_local(ev['at'], tz)}{' · ' + e(ev['reason']) if ev.get('reason') else ''}</div>"),
         empty="三天里没有新变化")
-    return (f"<div class=head><h2>今天</h2></div>{focus_html}{alerts}{calm}"
+    return (f"<div class=head><h2>今天</h2></div>{focus_html}{next_html}{alerts}{calm}"
             f"<h3 class=sub-h>最近三天的变化</h3>{changes}")
 
 
