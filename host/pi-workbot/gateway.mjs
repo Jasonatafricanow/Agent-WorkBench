@@ -12,6 +12,7 @@ import { pathToFileURL } from 'node:url';
 import { wb } from './workbench-client.mjs';
 import { createWorkbenchTools, retryMemoryWrites } from './tools.mjs';
 import { setTurn, clearTurn } from './turn-context.mjs';
+import { compactSpool as compactSpoolFile, extractAttachments, formatInboundText } from './intake-helpers.mjs';
 
 const RUNTIME = process.env.PI_RUNTIME || '/opt/xiyue-runtime';
 const require = createRequire(RUNTIME + '/package.json');
@@ -271,17 +272,22 @@ async function flush(chatKey, { ctx, items }) {
 // crash mid-Run is replayed on restart (Telegram will not redeliver an update the handler already took).
 const SPOOL = path.join(WORK_DIR, 'inbound.jsonl');
 function spool(entry) { fs.appendFileSync(SPOOL, JSON.stringify({ ...entry, at: new Date().toISOString() }) + '\n'); }
+const compactSpool = () => compactSpoolFile(SPOOL);
 
-async function handleText(ctx, { replay = false } = {}) {
+async function handleInbound(ctx, { replay = false } = {}) {
   const updateId = String(ctx.update.update_id);
+  const attachments = replay ? (ctx.attachments || []) : extractAttachments(ctx.message);
+  const rawText = ctx.message.text || ctx.message.caption || '';
+  const bodyText = formatInboundText(rawText, attachments);
+  if (!bodyText) return;
   if (!replay) spool({ update_id: updateId, chat_id: ctx.chat.id, from_id: ctx.from.id,
-    message_id: ctx.message.message_id, text: ctx.message.text });
+    message_id: ctx.message.message_id, text: rawText, attachments });
   const sourceRef = `tg://${BOT_ID}/${ctx.chat.id}/${ctx.message.message_id}`;
   let intake;
   try {
     intake = await wb('/v1/intake/inbound', { platform: 'telegram', bot_id: BOT_ID, update_id: updateId,
       chat_id: String(ctx.chat.id), message_id: String(ctx.message.message_id), external_user_id: String(ctx.from.id),
-      raw_source_ref: sourceRef, handled_inline: true });
+      raw_source_ref: sourceRef, handled_inline: true, attachments });
   } catch (error) {
     return replay ? undefined : ctx.reply('工作台暂时连不上，稍后再试。'); // stays in the spool for the next restart
   }
@@ -289,32 +295,15 @@ async function handleText(ctx, { replay = false } = {}) {
   if (intake.duplicate) return;
   if (!intake.accepted) return ctx.reply('这个账号还没有接入工作台。');
   const label = intake.resumed ? '消息（上次处理中断；先用 get_task / whats_new 核对已经写入的部分，不要重复写）' : '消息';
-  queueForRun(`tg-${ctx.chat.id}-${ctx.from.id}`, ctx, { intake, sourceRef, label, text: ctx.message.text, updateId });
+  queueForRun(`tg-${ctx.chat.id}-${ctx.from.id}`, ctx, { intake, sourceRef, label, text: bodyText, updateId });
 }
-bot.on('message:text', ctx => handleText(ctx));
-
-// Messages whose Run has not finished yet; the spool is rewritten to hold only those.
-function openSpool() {
-  const open = new Map();
-  if (!fs.existsSync(SPOOL)) return open;
-  for (const line of fs.readFileSync(SPOOL, 'utf8').split('\n').filter(Boolean)) {
-    try { const e = JSON.parse(line); if (e.done) open.delete(e.update_id); else open.set(e.update_id, e); } catch {}
-  }
-  return open;
-}
-function compactSpool() {
-  const open = openSpool();
-  const temp = SPOOL + '.tmp';
-  fs.writeFileSync(temp, [...open.values()].map(e => JSON.stringify(e) + '\n').join(''));
-  fs.renameSync(temp, SPOOL);
-  return open;
-}
+bot.on(['message:text', 'message:document', 'message:photo', 'message:voice', 'message:audio', 'message:video'], ctx => handleInbound(ctx));
 
 async function replaySpool() {
   for (const e of compactSpool().values()) {
     const chat = { id: e.chat_id };
-    await handleText({ chat, from: { id: e.from_id }, update: { update_id: e.update_id },
-      message: { message_id: e.message_id, text: e.text },
+    await handleInbound({ chat, from: { id: e.from_id }, update: { update_id: e.update_id },
+      message: { message_id: e.message_id, text: e.text }, attachments: e.attachments || [],
       reply: text => bot.api.sendMessage(e.chat_id, text), replyWithChatAction: async () => {} }, { replay: true });
   }
 }
@@ -328,6 +317,20 @@ bot.on('edited_message:text', async ctx => {
   if (!intake?.accepted || intake.duplicate) return;
   const note = intake.linked_tasks?.length ? `（这条消息关联任务：${intake.linked_tasks.join(', ')}，请核对是否需要更正）` : '';
   queueForRun(`tg-${ctx.chat.id}-${ctx.from.id}`, ctx, { intake, sourceRef, label: '编辑了之前的消息' + note, text: message.text });
+});
+
+bot.on('deleted_business_messages', async ctx => {
+  const deleted = ctx.deletedBusinessMessages || ctx.update?.deleted_business_messages;
+  if (!deleted) return;
+  const chatId = deleted.chat?.id;
+  for (const msgId of deleted.message_ids || []) {
+    await wb('/v1/intake/retracted', {
+      platform: 'telegram', bot_id: BOT_ID, update_id: `${ctx.update.update_id}:${msgId}`,
+      chat_id: String(chatId), message_id: String(msgId),
+      external_user_id: ctx.from?.id ? String(ctx.from.id) : null,
+      raw_source_ref: `tg://${BOT_ID}/${chatId}/${msgId}?retracted=${ctx.update.update_id}`,
+    }).catch(() => null);
+  }
 });
 
 // -------------------------------------------------------- wake events loop

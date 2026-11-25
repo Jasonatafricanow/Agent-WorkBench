@@ -79,6 +79,7 @@ class ApprovalService:
             )
             if not direct and not conn.execute(
                     """SELECT 1 FROM inbox_messages i WHERE i.workspace_id=? AND i.sender_principal_id=?
+                       AND i.retracted_at IS NULL
                        AND (i.raw_source_ref=? OR EXISTS (SELECT 1 FROM inbox_revisions r WHERE r.inbox_id=i.id
                             AND r.raw_source_ref=?))""",
                     (approver.workspace_id, approver.principal_id, source_ref, source_ref)).fetchone():
@@ -146,7 +147,8 @@ class ApprovalService:
             raise InvalidOperation("decided_at is required", field="decided_at")
         with write_transaction(self._db) as conn:
             if not conn.execute(
-                    """SELECT 1 FROM inbox_messages WHERE workspace_id=? AND sender_principal_id=? AND raw_source_ref=?""",
+                    """SELECT 1 FROM inbox_messages WHERE workspace_id=? AND sender_principal_id=?
+                       AND retracted_at IS NULL AND raw_source_ref=?""",
                     (approver.workspace_id, approver.principal_id, source_ref)).fetchone():
                 raise EvidenceRequired("source_ref must be a message the approver actually sent")
             row = conn.execute("SELECT id FROM external_approvals WHERE workspace_id=? AND system=? AND source_ref=?",

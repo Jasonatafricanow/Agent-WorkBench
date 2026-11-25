@@ -16,7 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .contracts import ActorContext
-from .errors import InvalidOperation, NotFound
+from .errors import Forbidden, InvalidOperation, NotFound
 from .storage import connect
 from .task_service import READ_ALL_ROLES, REQUESTER_EVENT_SCOPE, SqliteTaskService
 
@@ -237,3 +237,36 @@ def projects(database: str | Path, *, actor: ActorContext, project_id: str | Non
                              "progress": {"done": 0, "total": 0}}
     ordered = sorted(pool.values(), key=lambda p: (p["id"] is None, p["next_official_due"] or "9999", p["title"]))
     return {"projects": ordered}
+
+
+def schedules(database: str | Path, *, actor: ActorContext, project_id: str | None = None) -> dict:
+    """Recurring schedules and external watches for workspace team members (never requesters)."""
+    conn, role, _ = _open(database, actor)
+    with closing(conn):
+        if role not in READ_ALL_ROLES:
+            raise Forbidden("schedules and watches are for workspace members, not requesters")
+        _narrow(conn, actor, project_id, None)
+        ws = actor.workspace_id
+        sched_rows = [dict(r) for r in conn.execute(
+            """SELECT id, title, template_json, timezone, frequency, interval_n, local_time,
+                      next_fire_local, next_fire_at, occurrences, max_occurrences, until_at,
+                      active, anchor_day, created_at, updated_at
+               FROM schedule_rules WHERE workspace_id=?
+               ORDER BY active DESC, next_fire_at, title""", (ws,))]
+        scheds = []
+        for s in sched_rows:
+            tpl = json.loads(s.get("template_json") or "{}")
+            if project_id and tpl.get("project_id") != project_id:
+                continue
+            s["template"] = tpl
+            scheds.append(s)
+        clause, w_args = (" AND t.project_id=?", [project_id]) if project_id else ("", [])
+        watches = [dict(r) for r in conn.execute(
+            f"""SELECT w.id, w.task_id, w.dependency_id, w.source_kind, w.target_ref, w.expected_value,
+                       w.last_observed_value, w.status, w.created_at, w.updated_at,
+                       t.title AS task_title, t.version AS task_version, t.project_id
+                FROM external_watches w
+                LEFT JOIN tasks t ON t.workspace_id=w.workspace_id AND t.id=w.task_id
+                WHERE w.workspace_id=? {clause}
+                ORDER BY w.status='watching' DESC, w.updated_at DESC, w.id""", (ws, *w_args))]
+    return {"schedules": scheds, "watches": watches}
