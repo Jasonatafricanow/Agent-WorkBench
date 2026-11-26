@@ -278,5 +278,46 @@ class SchedulesWatchesAttachmentsRetractionTests(test_owner_console.OwnerConsole
         self.assertIn("已撤回失效", self.get(f"/task/{tid}", self.owner_auth))
 
 
+
+    def test_owner_marks_a_deleted_message_on_the_task_page_and_each_linked_task_wakes(self):
+        # In an ordinary bot chat Telegram sends nothing when a message is deleted: the owner says it here.
+        bind_identity(self.db, provider="telegram", bot_id="workbot", external_user_id="111", principal_id="gao")
+        msg = record_inbound(self.db, workspace_id="ws", platform="telegram", bot_id="workbot", update_id="m-1",
+                             chat_id="111", message_id="701", external_user_id="111",
+                             raw_source_ref="tg://workbot/111/701", clock=self.clock)
+        t1, t2 = self.task("one", requester_id="gao"), self.task("two", requester_id="gao")
+        for n, tid in enumerate((t1, t2)):
+            self.apply(self.owner, f"link-m{n}", {"op": "link_inbox", "task_id": tid, "inbox_id": msg["inbox_id"],
+                                                 "relation": "request", "evidence_type": "system"})
+        self.assertIn("这条消息作废", self.get(f"/task/{t1}", self.owner_auth))
+        self.assertNotIn("这条消息作废", self.get(f"/task/{t1}", self.viewer_auth))
+
+        status, location = self.post_form(self.form(nonce="ret-1", action="retract_source", inbox_id=msg["inbox_id"],
+                                                    back=f"/task/{t1}"))
+        self.assertEqual(status, 303)
+        self.assertIn("ok=", location)
+        self.assertEqual(self.q("SELECT retracted_source_ref FROM inbox_messages WHERE id=?", msg["inbox_id"]),
+                         [("owner-web:ret-1",)])
+        self.assertEqual(sorted(self.q("SELECT task_id FROM wake_events WHERE origin='telegram:workbot:retract'")),
+                         sorted([(t1,), (t2,)]))
+        for tid in (t1, t2):
+            self.assertEqual(self.svc.read(actor=self.owner, task_id=tid)["events"][-1]["kind"], "source_retracted")
+        page = self.get(f"/task/{t1}", self.owner_auth)
+        self.assertIn("已撤回失效", page)
+        self.assertNotIn("这条消息作废", page)
+        # A second press changes nothing.
+        self.post_form(self.form(nonce="ret-2", action="retract_source", inbox_id=msg["inbox_id"]))
+        self.assertEqual(len(self.q("SELECT id FROM wake_events WHERE origin='telegram:workbot:retract'")), 2)
+
+    def test_the_assistant_name_is_configuration_not_code(self):
+        import os
+        from unittest import mock
+        self.assertIn('data-k="chat">助手</a>', self.get("/", self.owner_auth))
+        with mock.patch.dict(os.environ, {"WORKBENCH_ASSISTANT_NAME": "小管家"}):
+            self.assertIn('data-k="chat">小管家</a>', self.get("/", self.owner_auth))
+            from workdesk.dashboard import _source_word
+            self.assertEqual(_source_word("xiyue-automation:daily"), "小管家定时任务")
+
+
 for _name in [n for n in dir(test_owner_console.OwnerConsoleTests) if n.startswith("test_")]:
     setattr(SchedulesWatchesAttachmentsRetractionTests, _name, None)

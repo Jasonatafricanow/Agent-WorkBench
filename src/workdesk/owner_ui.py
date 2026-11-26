@@ -142,6 +142,13 @@ def human_action_form(csrf: str, request_id: str, back: str = "/", *, can_apply:
     return apply_form + base_form
 
 
+def retract_source_button(csrf: str, inbox_id: str, back: str = "/") -> str:
+    """Telegram tells a bot nothing when a message is deleted in an ordinary chat, so the owner marks it here."""
+    return (f"<form method=post action=/owner/ops class=inline-act>"
+            f"{_hidden(csrf, back, action='retract_source', inbox_id=inbox_id)}"
+            "<button class=danger>这条消息作废</button></form>")
+
+
 def commitment_buttons(csrf: str, commitment_id: str, task_id: str, version: int, back: str = "/") -> str:
     return (f"<form method=post action=/owner/ops class=inline-act>"
             f"{_hidden(csrf, back, action='commitment_status', commitment_id=commitment_id, task_id=task_id, version=version)}"

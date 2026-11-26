@@ -167,7 +167,7 @@ class OwnerWebFeatureCompletionTests(test_owner_console.OwnerConsoleTests):
         dep_id = self.apply(
             self.owner, "dep-add",
             {"op": "add_dependency", "task_id": tid, "expected_version": 1, "kind": "external_response",
-             "awaited_outcome": "高老师盖章反馈", "holder_name": "高老师", "evidence_type": "explicit_user"},
+             "awaited_outcome": "同事盖章反馈", "holder_name": "同事", "evidence_type": "explicit_user"},
             {"op": "transition", "task_id": tid, "to": "WAITING", "evidence_type": "explicit_user"},
             {"op": "assign_responsibility", "task_id": tid, "executor_id": "agent", "work_class": "doc",
              "autonomy_level": "agent_bounded", "evidence_type": "explicit_user", "source_ref": "cli:1", "reason": "delegate"},
@@ -176,7 +176,7 @@ class OwnerWebFeatureCompletionTests(test_owner_console.OwnerConsoleTests):
         )[0]["dependency_id"]
 
         # Rail search + project filter + cross-workspace project 404.
-        filtered = self.get("/?q=" + urllib.parse.quote("高老师") + f"&project={proj}", self.owner_auth)
+        filtered = self.get("/?q=" + urllib.parse.quote("同事") + f"&project={proj}", self.owner_auth)
         rail_html = re.search(r"<aside class=rail>.*?</aside>", filtered, re.S).group(0)
         self.assertIn("审阅合同条款", rail_html)
         self.assertNotIn("买办公用品", rail_html)
@@ -185,7 +185,7 @@ class OwnerWebFeatureCompletionTests(test_owner_console.OwnerConsoleTests):
         self.assertEqual(err.exception.code, 404)
 
         task_page = self.get(f"/task/{tid}", self.owner_auth)
-        for text in ("等待与依赖", "高老师盖章反馈", "委托状态", "外部监控", "org/repo#12"):
+        for text in ("等待与依赖", "同事盖章反馈", "委托状态", "外部监控", "org/repo#12"):
             self.assertIn(text, task_page)
 
         # Viewer sees details cleanly without POST forms or scripts.
@@ -198,7 +198,7 @@ class OwnerWebFeatureCompletionTests(test_owner_console.OwnerConsoleTests):
         ver = self.q("SELECT version FROM tasks WHERE id=?", tid)[0][0]
         _, loc = self.post_form(self.form(
             nonce="res-dep", back=f"/task/{tid}?q=合同", action="resolve_dep", task_id=tid, version=str(ver),
-            dependency_id=dep_id, auto_ready="1", reason="高老师已邮件确认",
+            dependency_id=dep_id, auto_ready="1", reason="同事已邮件确认",
         ))
         self.assertIn("ok=", loc)
         self.assertIn("q=", loc)

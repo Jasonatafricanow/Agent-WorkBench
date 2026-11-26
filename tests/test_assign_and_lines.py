@@ -125,11 +125,11 @@ class TaskLines(Base):
 
 
 class WaitingInOneOp(Base):
-    """11-21 Xiyue: '已交高老师处理，等她反馈' took three tries; it is one op now."""
+    """11-21: '已交同事处理，等她反馈' took three tries; it is one op now."""
 
     def test_create_task_waiting_on_someone(self):
         out = self.apply(self.owner, "c", {"op": "create_task", "title": "充电宝售后", "evidence_type": "explicit_user",
-                                           "waiting_on": {"awaited_outcome": "高老师反馈", "responsible_principal_id": "gao"}})[0]
+                                           "waiting_on": {"awaited_outcome": "同事反馈", "responsible_principal_id": "gao"}})[0]
         self.assertEqual(self.q("SELECT state FROM tasks WHERE id=?", out["task_id"]), [("WAITING",)])
         self.assertEqual(self.q("SELECT kind, responsible_principal_id, status FROM dependencies WHERE task_id=?", out["task_id"]),
                          [("external_response", "gao", "open")])

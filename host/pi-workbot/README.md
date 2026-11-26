@@ -28,7 +28,7 @@ Setup (after WorkBench is running):
 python -m workdesk --db /data/workbench.sqlite bootstrap --workspace work --title 工作 --owner owner --owner-name <name> --agent agent --agent-name 工作bot
 python -m workdesk --db ... bind-identity --provider telegram --bot-id workbot --external-user-id <owner tg id> --principal owner
 python -m workdesk --db ... bind-identity --provider host --bot-id workbot --external-user-id agent --principal agent
-python -m workdesk --db ... add-member --workspace work --principal gao --name 高老师 --role requester
+python -m workdesk --db ... add-member --workspace work --principal colleague --name 同事 --role requester
 python -m workdesk --db ... bind-identity --provider telegram --bot-id workbot --external-user-id <gao tg id> --principal gao
 # monthly export from the internal system (columns renamed to external_key / title / official_due_local)
 python -m workdesk --db ... import-csv --workspace work --principal owner --source internal --period 2026-12 --file due.csv --map '{"案号":"external_key","名称":"title","官方期限":"official_due_local"}'

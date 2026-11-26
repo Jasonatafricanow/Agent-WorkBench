@@ -22,7 +22,7 @@ from .owner_ui import (
     FORM_CSS, FREQ_LABELS, PROJECT_STATE_LABELS, REMINDER_KIND_LABELS, WATCH_KIND_LABELS,
     adopt_soft_due_button, approval_buttons, cancel_reminder_button, commitment_buttons,
     human_action_form, project_create_form, project_edit_form, reconcile_unknown_form,
-    resolve_dep_button, schedule_create_form, schedule_toggle_button, today_focus_button,
+    resolve_dep_button, retract_source_button, schedule_create_form, schedule_toggle_button, today_focus_button,
     watch_cancel_button, watch_create_form,
 )
 from .panel_base import PB_CSS, hub
@@ -514,12 +514,16 @@ def _today_pane(ov, recent, stuck, load, tz, names, *, owner_csrf: str = "", tas
             f"<h3 class=sub-h>最近三天的变化</h3>{changes}")
 
 
+# The xiyue-* prefixes are fixed source ids written by the household assistant's gateway; the label uses
+# whatever the household calls that assistant (panel_base.assistant_name), not a name in the code.
 SOURCE_WORDS = (("tg://", "Telegram"), ("owner-web:", "网页工作台"), ("claude-code:", "Claude Code"),
-                ("xiyue-automation:", "溪月定时任务"), ("xiyue_todo", "溪月旧待办"))
+                ("xiyue-automation:", "{assistant}定时任务"), ("xiyue_todo", "{assistant}旧待办"))
 
 
 def _source_word(ref: str | None) -> str:
+    from .panel_base import assistant_name
     for prefix, word in SOURCE_WORDS:
+        word = word.replace("{assistant}", assistant_name())
         if ref and ref.startswith(prefix):
             return word
     return ""
@@ -618,8 +622,10 @@ def _task_pane(view, actor, names, tz, now, panel, *, owner_csrf: str = "", watc
             att_list = "".join(
                 f"<div class=meta>📎 {e(a['kind'])}{' · ' + e(a['file_name']) if a.get('file_name') else ''}"
                 f" ({e(a['file_ref'])})</div>" for a in atts)
+            act = (retract_source_button(owner_csrf, s["id"], back=back)
+                   if owner_csrf and not s.get("retracted_at") else "")
             return (f"{badge}{e(s['relation'])} · {e(sender)} · <span class=meta>{e(s['raw_source_ref'])}</span>"
-                    f"<div class=meta>{_local(s['received_at'], tz)}{rev}</div>{att_list}")
+                    f"<div class=meta>{_local(s['received_at'], tz)}{rev}</div>{att_list}{act}")
         src_html = f"<h3 class=sub-h>关联消息与附件</h3>{_list(sources, src_row)}"
 
     steps = []

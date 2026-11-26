@@ -319,6 +319,8 @@ bot.on('edited_message:text', async ctx => {
   queueForRun(`tg-${ctx.chat.id}-${ctx.from.id}`, ctx, { intake, sourceRef, label: '编辑了之前的消息' + note, text: message.text });
 });
 
+// Telegram reports deletions only for chats of a connected Business account; in an ordinary bot chat a
+// deleted message sends no update at all. There the owner marks it on the task page ("这条消息作废").
 bot.on('deleted_business_messages', async ctx => {
   const deleted = ctx.deletedBusinessMessages || ctx.update?.deleted_business_messages;
   if (!deleted) return;
