@@ -304,6 +304,21 @@ class WorkbenchApp:
                 raise InvalidOperation(f"delivery is already {row['status']}")
             self.delivery.settle(workspace_id=ws, delivery_id=delivery_id, status=status, provider_message_id=receipt)
             return "已核实发出" if status == "sent" else "已标记失败"
+        if action == "retract_source":
+            # Telegram does not tell a bot about deletions in ordinary chats: the owner says it here.
+            inbox_id = (form.get("inbox_id") or "").strip()
+            with closing(connect(self.db)) as conn:
+                msg = conn.execute("SELECT platform, bot_id, chat_id, message_id FROM inbox_messages "
+                                   "WHERE workspace_id=? AND id=?", (ws, inbox_id)).fetchone()
+            if msg is None:
+                raise NotFound("source message not found")
+            ref = f"owner-web:{form.get('nonce', '')}"
+            res = record_retract(self.db, workspace_id=ws, platform=msg["platform"], bot_id=msg["bot_id"],
+                                 update_id=ref, chat_id=msg["chat_id"], message_id=msg["message_id"],
+                                 raw_source_ref=ref, clock=self.clock)
+            if not res.get("accepted"):
+                raise InvalidOperation(res.get("reason") or "could not retract")
+            return "这条消息已作废，关联任务已记下" if not res.get("duplicate") else "这条消息之前已作废"
         if action == "human_apply":
             from .owner_ui import apply_human_request_ops
             hid = (form.get("human_action_id") or "").strip()

@@ -248,16 +248,19 @@ def record_retract(database: str | Path, *, workspace_id: str, platform: str, bo
                  "source message was retracted or deleted", "system", raw_source_ref, now, now))
             conn.execute("UPDATE tasks SET version=version+1, updated_at=? WHERE workspace_id=? AND id=?",
                          (now, workspace_id, task_id))
-        wake_id = None
-        if tasks:
+        # One wake per affected task: each task's follow-up is its own piece of work.
+        wake_ids = []
+        for task_id in tasks:
             wake_id = f"wake-{uuid.uuid4().hex}"
             conn.execute(
                 """INSERT INTO wake_events(id,workspace_id,task_id,origin,origin_event_id,kind,source_ref,status,
                      created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (wake_id, workspace_id, tasks[0], f"{platform}:{bot_id}:retract", str(update_id),
+                (wake_id, workspace_id, task_id, f"{platform}:{bot_id}:retract", f"{update_id}:{task_id}",
                  "external_change", raw_source_ref, "pending", now, now))
+            wake_ids.append(wake_id)
         return {"accepted": True, "inbox_id": original["id"], "linked_tasks": tasks,
-                "retracted_at": now, "wake_event_id": wake_id}
+                "retracted_at": now, "wake_event_id": wake_ids[0] if wake_ids else None,
+                "wake_event_ids": wake_ids}
 
 
 def finish_inbound(database: str | Path, *, workspace_id: str, inbox_id: str, ok: bool,
