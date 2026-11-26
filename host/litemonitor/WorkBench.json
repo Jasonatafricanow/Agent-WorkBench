@@ -2,7 +2,7 @@
   "id": "WorkBench",
   "meta": {
     "name": "工作台状态",
-    "version": "1.1",
+    "version": "1.2",
     "author": "Agent-WorkBench",
     "description": "只读显示 Agent-WorkBench 的当前焦点、下一步待办、进行中的任务、待审批、逾期，以及 Agent Host 是否在线（workbench.status.v1）。只有任务标题，不做任何写入或进程操作。",
     "url": "https://github.com/Jasonatafricanow/Agent-WorkBench"
@@ -46,7 +46,9 @@
           "overdue": "overdue",
           "todo_line": "todo_line",
           "doing_line": "doing_line",
-          "doing": "doing"
+          "doing": "doing",
+          "brief": "brief",
+          "attention": "attention"
         },
         "process": [
           {
@@ -68,13 +70,13 @@
       "key": "summary",
       "label": "工作台",
       "short_label": "WB",
-      "format_val": "{{line}}",
-      "color": "{{level}}",
+      "format_val": "{{brief}}",
+      "color": "{{attention}}",
       "unit": ""
     },
     {
       "key": "todo",
-      "label": "下一步待办",
+      "label": "待办",
       "short_label": "待办",
       "format_val": "{{todo_line}}",
       "color": "0",
@@ -90,7 +92,7 @@
     },
     {
       "key": "host",
-      "label": "Agent Host",
+      "label": "Host",
       "short_label": "Host",
       "format_val": "{{host_text}}",
       "color": "{{host_state}}",

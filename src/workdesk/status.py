@@ -31,7 +31,7 @@ def _short(title: str, width: int) -> str:
     return title[:width] + ("…" if len(title) > width else "")
 
 
-def _titles(rows, width: int = 12, most: int = 2) -> str:
+def _titles(rows, width: int = 10, most: int = 1) -> str:
     """A few task titles for the indicator, never descriptions or notes; '+N' counts the rest."""
     shown = [_short(r.get("title") or "", width) for r in rows[:most]]
     rest = len(rows) - len(shown)
@@ -56,13 +56,14 @@ def build_status(tasks, actor, *, generated_at: str, host_seen_at: float | None,
         parts.append(f"逾期{counts['overdue']}")
     if counts["human_actions"]:
         parts.append(f"待办{counts['human_actions']}")
+    brief = " · ".join(parts)  # without the Host part: the indicator shows Host on its own row
     if host == 2:
         parts.append("Host离线")
     elif host == 1:
         parts.append("Host迟")
     return {"contract": CONTRACT, "generated_at": generated_at, "now": title, **counts,
             "host_age_seconds": age, "host_state": host, "level": max(host, attention),
-            "line": " · ".join(parts),
+            "line": " · ".join(parts), "brief": brief, "attention": attention,
             # Titles only: what is being worked on and what comes next for the owner.
             "doing_line": _titles(overview["doing"]) or "无",
             "todo_line": _titles(overview["next_for_owner"]) or "无"}

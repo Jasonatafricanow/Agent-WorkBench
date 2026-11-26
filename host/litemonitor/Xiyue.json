@@ -34,7 +34,9 @@
         "id": "status",
         "url": "{{base_url}}/status/v1",
         "method": "GET",
-        "headers": { "Authorization": "Bearer {{status_token}}" },
+        "headers": {
+          "Authorization": "Bearer {{status_token}}"
+        },
         "response_format": "json",
         "extract": {
           "line": "line",
@@ -55,7 +57,7 @@
     },
     {
       "key": "model",
-      "label": "溪月模型",
+      "label": "模型",
       "short_label": "模型",
       "format_val": "{{model}}",
       "color": "0",

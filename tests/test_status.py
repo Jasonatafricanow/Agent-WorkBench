@@ -62,6 +62,8 @@ class StatusTests(StatusFixture):
         self.assertEqual((body["overdue"], body["host_state"], body["level"]), (1, 2, 2))  # Host never polled yet
         self.assertIn("逾期1", body["line"])
         self.assertIn("Host离线", body["line"])
+        self.assertNotIn("Host", body["brief"])  # Host has its own row in the indicator
+        self.assertEqual(body["attention"], 1)
         # Any authenticated Host call counts as a heartbeat.
         self.call("/v1/wake/claim", token=HOST, method="POST", data=json.dumps({"workspace_id": "ws"}).encode())
         body = self.call("/status/v1")[1]
@@ -75,8 +77,8 @@ class StatusTests(StatusFixture):
         self.task("d", title="交电费", state="READY")
         body = build_status(self.svc, self.owner, generated_at=NOW, host_seen_at=None)
         self.assertEqual(body["doing"], 1)
-        self.assertEqual(body["doing_line"], "写第四季度总结报告给老板…")
-        self.assertRegex(body["todo_line"], r"^[^/]+ / [^/]+ \+\d+$")  # two titles, the rest counted
+        self.assertEqual(body["doing_line"], "写第四季度总结报告给…")
+        self.assertRegex(body["todo_line"], r"^[^/]+ \+\d+$")  # one title, the rest counted
         self.assertNotIn("私人备注", json.dumps(body, ensure_ascii=False))
 
     def test_host_state_thresholds(self):
@@ -120,6 +122,7 @@ class LiteMonitorPluginContract(StatusFixture):
         out = {o["key"]: (self.render(o["format_val"], ctx), self.render(o["color"], ctx)) for o in plugin["outputs"]}
         self.assertEqual(out["host"], ("离线", "2"))
         self.assertTrue(out["summary"][0].startswith("无焦点"))
+        self.assertNotIn("Host", out["summary"][0])
         self.assertEqual(out["todo"][0], "无")
         self.assertIn(out["summary"][1], ("0", "1", "2"))
 
