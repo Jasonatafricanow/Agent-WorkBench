@@ -1,0 +1,67 @@
+{
+  "id": "Xiyue",
+  "meta": {
+    "name": "溪月状态",
+    "version": "1.0",
+    "author": "Agent-WorkBench",
+    "description": "只读显示溪月现在是执行中还是空闲、排队几条、用的模型、最近一小时有没有报错（xiyue.status.v1）。不含聊天内容。",
+    "url": "https://github.com/Jasonatafricanow/Agent-WorkBench"
+  },
+  "inputs": [
+    {
+      "key": "base_url",
+      "label": "溪月状态地址",
+      "type": "text",
+      "default": "http://192.168.5.198:8892",
+      "placeholder": "http://<NAS>:8892",
+      "scope": "global"
+    },
+    {
+      "key": "status_token",
+      "label": "只读状态 Token",
+      "type": "password",
+      "default": "",
+      "placeholder": "XIYUE_STATUS_TOKEN",
+      "scope": "global"
+    }
+  ],
+  "execution": {
+    "type": "chain",
+    "interval": 15,
+    "min_interval": 10,
+    "steps": [
+      {
+        "id": "status",
+        "url": "{{base_url}}/status/v1",
+        "method": "GET",
+        "headers": {
+          "Authorization": "Bearer {{status_token}}"
+        },
+        "response_format": "json",
+        "extract": {
+          "line": "line",
+          "level": "level",
+          "model": "model"
+        }
+      }
+    ]
+  },
+  "outputs": [
+    {
+      "key": "state",
+      "label": "溪月",
+      "short_label": "溪月",
+      "format_val": "{{line}}",
+      "color": "{{level}}",
+      "unit": ""
+    },
+    {
+      "key": "model",
+      "label": "模型",
+      "short_label": "模型",
+      "format_val": "{{model}}",
+      "color": "0",
+      "unit": ""
+    }
+  ]
+}
